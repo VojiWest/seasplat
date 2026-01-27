@@ -14,8 +14,9 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
+from utils.filter_utils import filter_gaussians
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, filter_criteria=None, filter_threshold=None):
     """
     Render the scene.
 
@@ -82,6 +83,21 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
 
+    # If there is a filtering criterion, then filter Gaussians (and their attributes) that exceed the threshold
+    if filter_criteria:
+        means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp = filter_gaussians(
+            filter_criteria = filter_criteria,
+            filter_threshold = filter_threshold,
+            means3D = means3D,
+            means2D = means2D,
+            shs = shs,
+            colors_precomp = colors_precomp,
+            opacity = opacity,
+            scales = scales,
+            rotations = rotations,
+            cov3D_precomp = cov3D_precomp
+        )
+
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     rendered_image, rendered_alpha, radii = rasterizer(
         means3D = means3D,
@@ -106,7 +122,7 @@ def homogenize_points(points):
     return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
 
 
-def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0):
+def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None):
     '''
     Use the original gaussian splatting renderer but just pass in
     a color override with precomputed colors as depth
@@ -134,5 +150,7 @@ def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Te
         pipe=pipe,
         bg_color=bg_color,
         scaling_modifier=scaling_modifier,
-        override_color=repeated_zs
+        override_color=repeated_zs,
+        filter_criteria=filter_criteria, 
+        filter_threshold=filter_threshold,
     )

@@ -183,6 +183,9 @@ class OptimizationParams(ParamGroup):
         self.scale_grad_threshold = 1.0
         self.do_z_score = False               # z threshold direct image to +/- 5 stdevs
 
+        # Filtering
+        self.filter_criteria = "max_sd"
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

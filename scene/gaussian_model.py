@@ -125,7 +125,15 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+    
+    def get_sd(self, method='max'):
+        if method == 'max':
+            sds = torch.max(self.get_scaling, dim=1).values
+        elif method == 'mean':
+            sds = torch.mean(self.get_scaling, dim=1)
 
+        return sds
+        
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 

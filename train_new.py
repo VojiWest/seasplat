@@ -60,6 +60,8 @@ from lpipsPyTorch import lpips
 from metrics import readImages, read_image
 from render_uw import estimate_atmospheric_light, render_set
 from utils.sh_utils import SH2RGB
+from utils.filter_utils import get_filter_variable, plot_filter
+
 
 def training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     if model_params.do_scene_bb:
@@ -476,7 +478,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             # Log and save
             if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                 training_report(
-                    tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
+                    tb_writer, opt_params, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
                     learned_bg, opt_params.learn_background,
                     rgb_01_loss, rgb_01_criterion,
                     opt_params.normalize_depth, opt_params.norm_depth_max, depth_l1_loss, opt_params.use_gt_depth,
@@ -497,7 +499,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 )
             else:
                 training_report(
-                    tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
+                    tb_writer, opt_params, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
                     learned_bg, opt_params.learn_background,
                     rgb_01_loss, rgb_01_criterion,
                     opt_params.normalize_depth, opt_params.norm_depth_max, depth_l1_loss, opt_params.use_gt_depth,
@@ -565,6 +567,15 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     torch.save(learned_bg, f"{scene.model_path}/bg_{iteration}.pth")
 
         iteration += 1
+
+    evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
+                    learned_bg, opt_params.learn_background,
+                    depth_norm_value=1.0, norm_depth_max=False, use_gt_depth=False,
+                    do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
+                    bs_model=None, at_model=None,
+                    do_z_score=False, filter_depth=False, disable_attenuation=False,
+                    depth_alpha_threshold=0.0,
+                    use_render_for_gw=False)
 
     '''
     post training save images
@@ -683,7 +694,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs,
+def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs,
                     learned_bg, do_learn_bg,
                     rgb_01_loss, rgb_01_criterion,
                     depth_norm_value=1.0, norm_depth_max=False, depth_l1_loss=None, use_gt_depth=False,
@@ -774,10 +785,12 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
+                l_ssim_test = 0.0
                 psnr_test = 0.0
                 dsc_at_test = 0.0
                 rgb_01_test = 0.0
                 depth_l1_test = 0.0
+                recon_depth_test = 0.0
                 depth_smooth_test = 0.0
                 alpha_smooth_test = 0.0
                 dcp_test = 0.0
@@ -877,10 +890,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
                     # alpha bg loss
                     alpha_bg_loss = 0.0
-                    # if do_learn_bg:
-                    #     alpha_bg_loss = alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(learned_bg.detach()), image_alpha)
-                    #     if do_seathru and iteration > seathru_from_iter:
-                    #         alpha_bg_loss += alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(bs_model.B_inf.detach().clone()), image_alpha)
+                    if do_learn_bg:
+                        alpha_bg_loss = alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(learned_bg.detach()), image_alpha)
+                        if do_seathru and iteration > seathru_from_iter:
+                            alpha_bg_loss = alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(bs_model.B_inf.detach().clone()), image_alpha)
+
 
                     '''
                     losses
@@ -889,6 +903,12 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     rgb_batch = torch.unsqueeze(image, dim=0)
                     gt_rgb_batch = torch.unsqueeze(gt_image, dim=0)
                     alpha_batch = torch.unsqueeze(image_alpha, dim=0)
+
+                    # depth reconstruction (depth weighted l1)
+                    if iteration > seathru_from_iter and do_seathru:
+                        dl1 = depth_weighted_l1_loss(underwater_image, gt_image, depth_image.detach())
+                    else:
+                        dl1 = depth_weighted_l1_loss(image, gt_image, depth_image.detach())
 
                     # dcp
                     if do_seathru and iteration > seathru_from_iter:
@@ -945,16 +965,19 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
                     if bs_model is not None and at_model is not None:
                         l1_test += l1_loss(underwater_image.squeeze(), gt_image).mean().double()
+                        l_ssim_test += ssim(underwater_image.squeeze(), gt_image).mean().double()
                         psnr_test += psnr(underwater_image.squeeze(), gt_image).mean().double()
                         rgb_sv_test += rgb_sv_loss
                         rgb_sat_test += rgb_sat_loss
                     else:
                         l1_test += l1_loss(image, gt_image).mean().double()
+                        l_ssim_test += ssim(image, gt_image).mean().double()
                         psnr_test += psnr(image, gt_image).mean().double()
                     if viewpoint.original_depth_image is not None:
                         depth_l1_test += l1_loss(depth_image, gt_depth_image)
                     rgb_01_test += rgb_01_loss
                     dcp_test += dcp_loss
+                    recon_depth_test += dl1
                     depth_smooth_test += depth_smooth_loss
                     alpha_smooth_test += alpha_smooth_loss
                     gw_test += gw_loss
@@ -965,9 +988,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         dsc_at_test += dsc_at_loss
 
                 l1_test /= len(config['cameras'])
+                l_ssim_test /= len(config['cameras'])
                 psnr_test /= len(config['cameras'])
                 rgb_01_test /= len(config['cameras'])
                 dcp_test /= len(config['cameras'])
+                recon_depth_test /= len(config['cameras'])
                 depth_smooth_test /= len(config['cameras'])
                 alpha_smooth_test /= len(config['cameras'])
                 gw_test /= len(config['cameras'])
@@ -982,6 +1007,23 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 if at_criterion is not None:
                     dsc_at_test /= len(config['cameras'])
 
+                if do_seathru and iteration > seathru_from_iter:
+                    total_loss_test = (
+                        (1.0 - opt_params.lambda_dssim) * l1_test 
+                        + opt_params.lambda_dssim * (1.0 - l_ssim_test) 
+                        + opt_params.dwr_lambda * recon_depth_test
+                        + opt_params.bg_lambda * alpha_bg_test 
+                        + opt_params.depth_smooth_lambda * depth_smooth_test 
+                        + opt_params.gw_loss_lambda * gw_test
+                        + opt_params.sat_loss_lambda * rgb_sat_test 
+                        + opt_params.dcp_loss_lambda * dcp_test
+                    )
+                else:
+                    total_loss_test = (
+                        (1.0 - opt_params.lambda_dssim) * l1_test 
+                        + opt_params.lambda_dssim * (1.0 - l_ssim_test)
+                    )
+
                 # write loss stats to tensorboard
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
@@ -992,6 +1034,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - alpha_smooth_test', alpha_smooth_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - gw_loss', gw_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - binf_loss', binf_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - recon_depth_loss', recon_depth_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - total_loss', total_loss_test, iteration)
                     if viewpoint.original_depth_image is not None:
                         tb_writer.add_scalar(config['name'] + '/loss_viewpoint - depth_l1_loss', depth_l1_test, iteration)
                     if bs_model is not None and at_model is not None:
@@ -1006,6 +1050,142 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
+
+def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene : Scene, renderFunc, renderArgs,
+                    learned_bg, do_learn_bg,
+                    depth_norm_value=1.0, norm_depth_max=False, use_gt_depth=False,
+                    do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
+                    bs_model=None, at_model=None,
+                    do_z_score=False, filter_depth=False, disable_attenuation=False,
+                    depth_alpha_threshold=0.0,
+                    use_render_for_gw=False,
+):
+    torch.cuda.empty_cache()
+    assert not torch.is_grad_enabled()
+    validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
+                            {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
+
+    print("Post Processing Filtering Gaussians")
+
+    filter_path = os.path.join(scene.model_path, "Filtering")
+    os.makedirs(filter_path)
+
+    # Get filtering variables and thresholds
+    filter_criteria = opt_params.filter_criteria
+    filter_variable, max_value, min_value = get_filter_variable(filter_criteria, scene.gaussians)
+    filter_thresholds = torch.linspace(min_value, max_value, steps=20)
+
+    
+    for config in validation_configs:
+        l1_losses = []
+        l_ssims = []
+        psnrs = []
+        for threshold in filter_thresholds:
+            l1 = 0.0
+            l_ssim = 0.0
+            psnr_metric = 0.0
+            if config['cameras'] and len(config['cameras']) > 0:
+                for idx, viewpoint in enumerate(config['cameras']):
+                    # Render image
+                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
+                    render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
+
+                    rendered_image = render_pkg["render"]
+                    image_alpha = render_pkg["alpha"]
+                    depth_image = render_depth_pkg["render"][0].unsqueeze(0)
+
+                    if filter_depth:
+                        depth_image = depth_image / image_alpha
+                        if torch.any(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image))):
+                            valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
+                            if len(valid_depth_vals) == 0:
+                                print(f"[eval] everything is nan")
+                                not_nan_max = 100.0
+                            else:
+                                not_nan_max = torch.max(valid_depth_vals).item()
+                            depth_image = torch.nan_to_num(depth_image, not_nan_max, not_nan_max)
+                        depth_image = depth_image / depth_norm_value
+                        if norm_depth_max:
+                            if depth_image.min() != depth_image.max():
+                                depth_image = (depth_image - depth_image.min()) / (depth_image.max() - depth_image.min())
+                            else:
+                                depth_image = depth_image / depth_image.max()
+
+                        depth_mask = image_alpha.detach() > depth_alpha_threshold
+                        masked_depth_image = depth_image * depth_mask
+                        normalized_masked_depth_image = torch.clamp(masked_depth_image / torch.max(masked_depth_image), 0.0, 1.0)
+
+                    if do_learn_bg:
+                        if bg_from_bs and do_seathru and iteration > seathru_from_iter:
+                            bg_image = torch.zeros_like(rendered_image) * 1.0
+                            image = rendered_image
+                        else:
+                            bg_image = torch.sigmoid(learned_bg).reshape(3, 1, 1) * (1 - image_alpha)
+                            image = rendered_image + bg_image
+                        clamped_bg_image = torch.clamp(bg_image, 0.0, 1.0)
+                    else:
+                        image = rendered_image
+
+                    normalized_depth_image = torch.clamp(depth_image / torch.max(depth_image), 0.0, 1.0)
+                    clamped_raw_render_image = torch.clamp(rendered_image, 0.0, 1.0)
+                    clamped_rgb_image = torch.clamp(image, 0.0, 1.0)
+
+                    # implement the forward process here
+                    if bs_model is not None and at_model is not None:
+                        if use_gt_depth:
+                            assert viewpoint.original_depth_image is not None
+                            depth_image = viewpoint.original_depth_image.cuda()
+                        depth_batch = torch.unsqueeze(depth_image, dim=0)
+                        rgb_batch = torch.unsqueeze(image, dim=0)
+                        if disable_attenuation:
+                            attenuation_map = torch.ones_like(rgb_batch)
+                        else:
+                            attenuation_map = at_model(depth_batch)
+                        direct = rgb_batch * attenuation_map
+                        attenuation_map_normalized = attenuation_map / torch.max(attenuation_map)
+
+                        if do_z_score:
+                            direct_mean = direct.mean(dim=[2, 3], keepdim=True)
+                            direct_std = direct.std(dim=[2, 3], keepdim=True)
+                            direct_z = (direct - direct_mean) / direct_std
+                            clamped_z = torch.clamp(direct_z, -5, 5)
+                            direct_filtered = torch.clamp(
+                                (clamped_z * direct_std) + torch.maximum(direct_mean, torch.Tensor([1. / 255]).cuda()), 0, 1)
+                            direct = direct_filtered
+
+                        backscatter = bs_model(depth_batch)
+                        normalized_bs = backscatter / torch.max(backscatter)
+                        underwater_image = torch.clamp(direct + backscatter, 0.0, 1.0)
+
+                    # get the groundtruth rgb image
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if viewpoint.original_depth_image is not None:
+                        gt_depth_image = viewpoint.original_depth_image.to("cuda")
+                        gt_normalized_depth_image = torch.clamp(gt_depth_image / torch.max(gt_depth_image), 0.0, 1.0)
+
+                    if bs_model is not None and at_model is not None:
+                        l1 += l1_loss(underwater_image.squeeze(), gt_image).mean().double()
+                        l_ssim += ssim(underwater_image.squeeze(), gt_image).mean().double()
+                        psnr_metric += psnr(underwater_image.squeeze(), gt_image).mean().double()
+                    else:
+                        l1 += l1_loss(image, gt_image).mean().double()
+                        l_ssim += ssim(image, gt_image).mean().double()
+                        psnr_metric += psnr(image, gt_image).mean().double()
+
+                l1 /= len(config['cameras'])
+                l_ssim /= len(config['cameras'])
+                psnr_metric /= len(config['cameras'])
+
+                l1_losses.append(l1)
+                l_ssims.append(l_ssim)
+                psnrs.append(psnr_metric)
+
+        print("PSNRS: ", psnrs)
+        print("Thresholds: ", filter_thresholds)
+        plot_filter(filter_criteria, filter_thresholds, l1_losses, l_ssims, psnrs, filter_path, iteration, config)
+
+
+                        
 
 if __name__ == "__main__":
     # Set up command line argument parser
