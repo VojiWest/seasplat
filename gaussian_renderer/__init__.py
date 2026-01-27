@@ -84,7 +84,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # If there is a filtering criterion, then filter Gaussians (and their attributes) that exceed the threshold
-    if filter_criteria:
+    if filter_criteria is not None:
         means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp = filter_gaussians(
             filter_criteria = filter_criteria,
             filter_threshold = filter_threshold,

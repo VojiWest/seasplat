@@ -20,11 +20,14 @@ def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, c
     filtered_means3D = means3D[mask]
     filtered_means2D = means2D[mask]
     filtered_shs = shs[mask]
-    filtered_colors_precomp = colors_precomp[mask]
+    if colors_precomp is not None:
+        filtered_colors_precomp = colors_precomp[mask]
+    else:
+        filtered_colors_precomp = colors_precomp
     filtered_opacity = opacity[mask]
     filtered_scales = scales[mask]
     filtered_rotations = rotations[mask]
-    filtered_cov3D_precomp = cov3D_precomp[mask]
+    filtered_cov3D_precomp = cov3D_precomp
 
     return filtered_means3D, filtered_means2D, filtered_shs, filtered_colors_precomp, filtered_opacity, filtered_scales, filtered_rotations, filtered_cov3D_precomp
 

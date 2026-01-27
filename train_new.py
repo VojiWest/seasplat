@@ -515,6 +515,24 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     recon_depth_loss=dl1,
                 )
 
+            if opt_params.do_seathru and iteration > opt_params.seathru_from_iter and iteration % 5000 == 0:
+                evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
+                        learned_bg, opt_params.learn_background,
+                        opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                        opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs,
+                        bs_model, at_model,
+                        opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
+                        depth_alpha_threshold=opt_params.depth_alpha_threshold,
+                        use_render_for_gw=opt_params.use_render_for_gw
+                        )
+            elif iteration % 5000 == 0:
+                evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
+                        learned_bg, opt_params.learn_background,
+                        opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                        filter_depth=opt_params.filter_depth,
+                        depth_alpha_threshold=opt_params.depth_alpha_threshold,
+                        use_render_for_gw=opt_params.use_render_for_gw)
+
             # Densification
             if iteration < opt_params.densify_until_iter:
                 if iteration < opt_params.freeze_gs_from_iter:
@@ -567,15 +585,6 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     torch.save(learned_bg, f"{scene.model_path}/bg_{iteration}.pth")
 
         iteration += 1
-
-    evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
-                    learned_bg, opt_params.learn_background,
-                    depth_norm_value=1.0, norm_depth_max=False, use_gt_depth=False,
-                    do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
-                    bs_model=None, at_model=None,
-                    do_z_score=False, filter_depth=False, disable_attenuation=False,
-                    depth_alpha_threshold=0.0,
-                    use_render_for_gw=False)
 
     '''
     post training save images
