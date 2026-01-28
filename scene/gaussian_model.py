@@ -367,7 +367,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-        self.xyz_gradient_individual = self.xyz_gradient_individual[valid_points_mask]
+        # self.xyz_gradient_individual = self.xyz_gradient_individual[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
@@ -479,6 +479,8 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
+        self.xyz_gradient_individual = torch.empty(0)
+
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
@@ -488,5 +490,7 @@ class GaussianModel:
     def add_grad(self, viewspace_point_tensor, visibility_filter, image_idx, num_images):
         if self.xyz_gradient_individual.shape[0] < 2: # If empty then initialize to shape num_gaussians x num_images
             self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
+            print("Expanding Gradient Tracker: ", self.xyz_gradient_individual.shape)
+        print("Image number: ", image_idx, "out of: ", num_images)
 
-        self.xyz_gradient_individual[visibility_filter][image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1, keepdim=True)
+        self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)

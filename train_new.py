@@ -204,9 +204,6 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         render_pkg = render(viewpoint_cam, gaussians, pipe_params, bg)
         rendered_image, image_alpha, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["alpha"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
-        # Add gradient for tracking variance
-        gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(viewpoint_stack))
 
         if opt_params.learn_background:
             if opt_params.bg_from_bs and opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
@@ -519,6 +516,10 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     opacity_prior_loss=opacity_prior_loss,
                     recon_depth_loss=dl1,
                 )
+
+            # VOG Tracking
+            # Add gradient for tracking variance
+            gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
 
             if opt_params.do_seathru and iteration > opt_params.seathru_from_iter and iteration % 5000 == 0:
                 evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),

@@ -56,7 +56,7 @@ def get_inter_view_gradient_variance(gradients, method='var'):
                 var = torch.var(gaussian_non_zero, dim=0)
                 variances[idx] = var
             if method == 'sd':
-                sd = torch.sd(gaussian_non_zero, dim=0)
+                sd = torch.std(gaussian_non_zero, dim=0)
                 variances[idx] = sd
         else:
             variances[idx] = -1

@@ -154,3 +154,16 @@ def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Te
         filter_criteria=filter_criteria, 
         filter_threshold=filter_threshold,
     )
+
+def render_uncertainty(uncertainty, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None):
+
+    return render(
+        viewpoint_camera=viewpoint_camera,
+        pc=pc,
+        pipe=pipe,
+        bg_color=bg_color,
+        scaling_modifier=scaling_modifier,
+        override_color=uncertainty,
+        filter_criteria=filter_criteria, 
+        filter_threshold=filter_threshold,
+    )
