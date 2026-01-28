@@ -479,8 +479,6 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
-        self.xyz_gradient_individual = torch.empty(0)
-
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
@@ -494,3 +492,7 @@ class GaussianModel:
         print("Image number: ", image_idx, "out of: ", num_images)
 
         self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)
+
+    def reset_grad_tracking(self):
+        self.xyz_gradient_individual = torch.empty(0)
+

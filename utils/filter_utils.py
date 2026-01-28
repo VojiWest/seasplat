@@ -68,7 +68,7 @@ def plot_filter(filter_criteria, filter_thresholds, quantiles, l1_losses, l_ssim
     x = quantiles
 
     plt.plot(x, l1_losses)
-    title = "Test L1 Loss Filtering" + str(filter_criteria)
+    title = split + " L1 Loss Filtering " + str(filter_criteria)
     plt.title(title)
     plt.ylabel("L1 Loss")
     x_label = str(filter_criteria) + " Percentile Kept"
@@ -77,7 +77,7 @@ def plot_filter(filter_criteria, filter_thresholds, quantiles, l1_losses, l_ssim
     plt.close()
 
     plt.plot(x, psnrs)
-    title = "Test PSNR Filtering" + str(filter_criteria)
+    title = split + " PSNR Filtering " + str(filter_criteria)
     plt.title(title)
     plt.ylabel("PSNR")
     x_label = str(filter_criteria) + " Percentile Kept"

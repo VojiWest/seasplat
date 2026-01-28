@@ -18,7 +18,7 @@ import torch
 from typing import List
 from random import randint
 from utils.loss_utils import l1_loss, ssim, depth_weighted_l1_loss, depth_weighted_l2_loss
-from gaussian_renderer import render, render_depth, network_gui
+from gaussian_renderer import render, render_depth, network_gui, render_uncertainty
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
@@ -538,6 +538,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                         filter_depth=opt_params.filter_depth,
                         depth_alpha_threshold=opt_params.depth_alpha_threshold,
                         use_render_for_gw=opt_params.use_render_for_gw)
+                
+            if iteration % opt_params.densification_interval == 0:
+                gaussians.reset_grad_tracking()
 
             # Densification
             if iteration < opt_params.densify_until_iter:
@@ -1101,6 +1104,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
         l1_losses = []
         l_ssims = []
         psnrs = []
+        rendered_uq = False
         for threshold in filter_thresholds:
             l1 = 0.0
             l_ssim = 0.0
@@ -1110,6 +1114,17 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                     # Render image
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
                     render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
+
+                    if "vog" in filter_criteria and rendered_uq == False:
+                        render_uncertainty_pkg = render_uncertainty(filter_variable, viewpoint, scene.gaussians, *renderArgs)
+                        render_uncertainty_image = render_uncertainty_pkg["render"]
+                        clamped_render_uncertainty_image = torch.clamp(render_uncertainty_image, 0.0, 1.0)
+
+                        # Save to tensorboard
+                        tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
+                        tb_writer.add_images(f"{tag_header}/uncertainty", render_uncertainty_image[None], global_step=iteration)
+                        tb_writer.add_images(f"{tag_header}/clamped_uncertainty", clamped_render_uncertainty_image[None], global_step=iteration)
+                        
 
                     rendered_image = render_pkg["render"]
                     image_alpha = render_pkg["alpha"]
@@ -1200,6 +1215,8 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                 l1_losses.append(l1.cpu().item())
                 l_ssims.append(l_ssim.cpu().item())
                 psnrs.append(psnr_metric.cpu().item())
+
+                rendered_uq = True
 
         print("PSNRS: ", psnrs)
         print("Thresholds: ", filter_thresholds)
