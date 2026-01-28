@@ -53,6 +53,7 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
+        self.xyz_gradient_individual = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -116,7 +117,7 @@ class GaussianModel:
     def get_xyz(self):
         return self._xyz
 
-    @property
+    @property 
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
@@ -133,6 +134,10 @@ class GaussianModel:
             sds = torch.mean(self.get_scaling, dim=1)
 
         return sds
+    
+    def get_inter_view_gradients(self):
+        return self.xyz_gradient_individual
+
         
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
@@ -362,6 +367,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        self.xyz_gradient_individual = self.xyz_gradient_individual[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
@@ -478,3 +484,9 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    def add_grad(self, viewspace_point_tensor, visibility_filter, image_idx, num_images):
+        if self.xyz_gradient_individual.shape[0] < 2: # If empty then initialize to shape num_gaussians x num_images
+            self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
+
+        self.xyz_gradient_individual[visibility_filter][image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1, keepdim=True)

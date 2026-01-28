@@ -197,12 +197,17 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        img_idx = randint(0, len(viewpoint_stack)-1)
+        viewpoint_cam = viewpoint_stack.pop(img_idx)
 
         # Render
         render_pkg = render(viewpoint_cam, gaussians, pipe_params, bg)
         rendered_image, image_alpha, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["alpha"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+        # Add gradient for tracking variance
+        gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(viewpoint_stack))
+
         if opt_params.learn_background:
             if opt_params.bg_from_bs and opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                 # do not use learned background; rely on backscatter to hopefully fill this in
@@ -1077,12 +1082,18 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     print("Post Processing Filtering Gaussians")
 
     filter_path = os.path.join(scene.model_path, "Filtering")
-    os.makedirs(filter_path)
+    if not os.path.exists(filter_path):
+        os.makedirs(filter_path)
 
     # Get filtering variables and thresholds
     filter_criteria = opt_params.filter_criteria
-    filter_variable, max_value, min_value = get_filter_variable(filter_criteria, scene.gaussians)
-    filter_thresholds = torch.linspace(min_value, max_value, steps=20)
+    filter_variable = get_filter_variable(filter_criteria, scene.gaussians)
+    print("Filtering Based on: ", filter_criteria)
+    print("Filter Variable Shape: ", filter_variable.shape)
+    print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
+    # filter_thresholds = torch.linspace(min_value, max_value, steps=20)
+    quantiles = torch.tensor([0.5, 0.6, 0.7, 0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999])
+    filter_thresholds = torch.quantile(filter_variable, quantiles)
 
     
     for config in validation_configs:
@@ -1185,13 +1196,13 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                 l_ssim /= len(config['cameras'])
                 psnr_metric /= len(config['cameras'])
 
-                l1_losses.append(l1)
-                l_ssims.append(l_ssim)
-                psnrs.append(psnr_metric)
+                l1_losses.append(l1.cpu().item())
+                l_ssims.append(l_ssim.cpu().item())
+                psnrs.append(psnr_metric.cpu().item())
 
         print("PSNRS: ", psnrs)
         print("Thresholds: ", filter_thresholds)
-        plot_filter(filter_criteria, filter_thresholds, l1_losses, l_ssims, psnrs, filter_path, iteration, config)
+        plot_filter(filter_criteria, filter_thresholds, quantiles.cpu().numpy(), l1_losses, l_ssims, psnrs, filter_path, iteration, config['name'])
 
 
                         
