@@ -1110,6 +1110,9 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
         methods.append("depth_weighted")
 
     for method in methods:
+        all_l1_losses = []
+        all_l_ssims = []
+        all_psnrs = []
         for config in validation_configs:
             l1_losses = []
             l_ssims = []
@@ -1249,9 +1252,14 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
                     rendered_uq = True
 
+            all_l1_losses.append(l1_losses)
+            all_l_ssims.append(l_ssims)
+            all_psnrs.append(psnrs)
+
             print("PSNRS: ", psnrs)
             print("Thresholds: ", filter_thresholds)
-            plot_filter(method, filter_thresholds, quantiles.cpu().numpy(), l1_losses, l_ssims, psnrs, filter_path, iteration, config['name'])
+    
+    plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_psnrs, filter_path, iteration, methods, validation_configs)
 
 
                         

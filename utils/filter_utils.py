@@ -96,24 +96,37 @@ def get_depths(gaussians, viewpoint_camera):
 
     return zs.cpu()
 
-def plot_filter(filter_criteria, filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_path, iteration, split):
+def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_path, iteration, methods, split_names):
+    splits = [split_names[0]['name'].split("_")[1], split_names[1]['name'].split("_")[1]]
+
     # x = filter_thresholds
     x = quantiles
 
-    plt.plot(x, l1_losses)
-    title = split + " L1 Loss Filtering " + str(filter_criteria)
+    title = "L1 Loss Filtering"
+    for idx, loss in enumerate(l1_losses):
+        linetype = ':'
+        if idx % 2 == 1:
+            linetype = '-'
+        plt.plot(x, loss, label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
+
     plt.title(title)
     plt.ylabel("L1 Loss")
-    x_label = str(filter_criteria) + " Percentile Kept"
+    x_label = "Percentile Kept"
     plt.xlabel(x_label)
-    plt.savefig(f"{folder_path}/{split}_{filter_criteria}_loss_filter_plot_{iteration}.png")
+    plt.legend()
+    plt.savefig(f"{folder_path}/loss_filter_plot_{iteration}.png")
     plt.close()
 
-    plt.plot(x, psnrs)
-    title = split + " PSNR Filtering " + str(filter_criteria)
+    for idx, psnr in enumerate(psnrs):
+        linetype = ':'
+        if idx % 2 == 1:
+            linetype = '-'
+        plt.plot(x, psnr, label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
+    title = "PSNR Filtering"
     plt.title(title)
     plt.ylabel("PSNR")
-    x_label = str(filter_criteria) + " Percentile Kept"
+    x_label = "Percentile Kept"
     plt.xlabel(x_label)
-    plt.savefig(f"{folder_path}/{split}_{filter_criteria}_psnr_filter_plot_{iteration}.png")
+    plt.legend()
+    plt.savefig(f"{folder_path}/psnr_filter_plot_{iteration}.png")
     plt.close()
