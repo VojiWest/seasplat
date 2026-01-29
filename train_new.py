@@ -1098,6 +1098,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     # Get filtering variables and thresholds
     filter_criteria = opt_params.filter_criteria
     filter_variable = get_filter_variable(filter_criteria, scene.gaussians)
+    filter_variable_const = filter_variable.clone()
     print("Filtering Based on: ", filter_criteria)
     print("Filter Variable Shape: ", filter_variable.shape)
     print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
@@ -1129,7 +1130,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
                     for idx, viewpoint in enumerate(config['cameras']):
                         if method == "depth_weighted":
-                            filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable, gaussians=scene.gaussians, viewpoint_camera=viewpoint)
+                            filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint)
                             threshold = torch.quantile(filter_variable, quantiles[t_idx])
 
                         # Render image
@@ -1160,6 +1161,8 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                         rendered_image = render_pkg["render"]
                         image_alpha = render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
+
+                        print("Depth Image Min: ", torch.min(depth_image), " Max: ", torch.max(depth_image), " Mean: ", torch.mean(depth_image))
 
                         if filter_depth:
                             depth_image = depth_image / image_alpha
