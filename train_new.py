@@ -521,7 +521,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             # Add gradient for tracking variance
             gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
 
-            if abs(5000 - (iteration % 5000)) <= len(scene.getTrainCameras()) and not viewpoint_stack:
+            if abs(10000 - (iteration % 10000)) <= len(scene.getTrainCameras()) and not viewpoint_stack:
                 if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                     evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
                             learned_bg, opt_params.learn_background,
@@ -1122,7 +1122,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                 if config['cameras'] and len(config['cameras']) > 0:
                     # Save histogram of variable
                     if "test" in config['name']:
-                        tb_writer.add_histogram(f"test_filter/filter_variable", filter_variable, global_step=iteration)
+                        tb_writer.add_histogram(f"test_filter/filter_variable_{method}", filter_variable, global_step=iteration)
 
                     for idx, viewpoint in enumerate(config['cameras']):
                         if method == "depth_weighted":
@@ -1222,7 +1222,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             underwater_image = torch.clamp(direct + backscatter, 0.0, 1.0)
 
                         if "test" in config['name'] and bs_model is not None and at_model is not None:
-                            tb_writer.add_images(f"{tag_header}/filtered_underwater_image_{method}_{iteration}", underwater_image, global_step=t_idx)
+                            tb_writer.add_images(f"{tag_header}/filtered_underwater_image_{method}", underwater_image, global_step=t_idx)
 
                         # get the groundtruth rgb image
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)

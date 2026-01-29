@@ -65,7 +65,11 @@ def get_inter_view_gradient_variance(gradients, method='var'):
 
 def get_depth_weighted_gradient_variance(variances, gaussians, viewpoint_camera, depth_lambda = 1):
     depths = get_depths(gaussians, viewpoint_camera)
-    dw_variances = variances * (depth_lambda * 1/(depths+0.0001))
+    dw_variances = variances * (depth_lambda / (depths+0.0001))
+
+    print("Variances: ", variances)
+    print("Depths: ", depths)
+    print("Depth Weighted Variances: ", dw_variances)
 
     return dw_variances
 
