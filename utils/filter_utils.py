@@ -41,7 +41,7 @@ def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, c
     filtered_cov3D_precomp = cov3D_precomp
 
     filtered_pct = round(100 - (100 * (filtered_opacity.numel() / opacity.numel())), 4)
-    print(f"Filtered {filtered_pct} % of Gaussians with Threshold of {round(filter_threshold.item(), 5)}")
+    # print(f"Filtered {filtered_pct} % of Gaussians with Threshold of {round(filter_threshold.item(), 5)}")
 
     return filtered_means3D, filtered_means2D, filtered_shs, filtered_colors_precomp, filtered_opacity, filtered_scales, filtered_rotations, filtered_cov3D_precomp
 
@@ -62,6 +62,35 @@ def get_inter_view_gradient_variance(gradients, method='var'):
             variances[idx] = -1
             
     return variances
+
+def get_depth_weighted_gradient_variance(variances, gaussians, viewpoint_camera, depth_lambda = 1):
+    depths = get_depths(gaussians, viewpoint_camera)
+    dw_variances = variances * (depth_lambda * 1/(depths+0.0001))
+
+    return dw_variances
+
+def homogenize_points(points):
+    """Convert batched points (xyz) to (xyz1)."""
+    return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+
+def get_depths(gaussians, viewpoint_camera):
+    # Taken from gaussian_rendeder
+
+    points_world = gaussians.get_xyz # torch.Size([25837, 3]), torch.float32
+    T_cam_world = viewpoint_camera.world_view_transform.T # torch.Size([4, 4]), torch.float32
+
+    # homogenize gaussian centers
+    points_world_homogenized = homogenize_points(points_world)
+
+    # apply T_cam_world to these points
+    #T_cam_world = T_world_cam.inverse()
+    points_cam_homogenized = (T_cam_world @ points_world_homogenized.T).T
+    points_cam = points_cam_homogenized[:, :3]
+
+    # get the zs and use as color for rendering
+    zs = points_cam[:, 2]
+
+    return zs.cpu()
 
 def plot_filter(filter_criteria, filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_path, iteration, split):
     # x = filter_thresholds

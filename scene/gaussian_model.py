@@ -489,7 +489,7 @@ class GaussianModel:
         if self.xyz_gradient_individual.shape[0] < 2: # If empty then initialize to shape num_gaussians x num_images
             self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
             print("Expanding Gradient Tracker: ", self.xyz_gradient_individual.shape)
-        print("Image number: ", image_idx, "out of: ", num_images)
+        # print("Image number: ", image_idx, "out of: ", num_images)
 
         self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)
 

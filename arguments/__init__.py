@@ -185,6 +185,7 @@ class OptimizationParams(ParamGroup):
 
         # Filtering
         self.filter_criteria = "max_sd"
+        self.depth_weighted_filtering = True
 
         super().__init__(parser, "Optimization Parameters")
 

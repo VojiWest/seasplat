@@ -156,8 +156,13 @@ def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Te
     )
 
 def render_uncertainty(uncertainty, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None):
+    uncertainty = uncertainty.to(pc.get_xyz.device)
 
     repeated_uncertainties = uncertainty.unsqueeze(-1).repeat(1,3)
+
+    # print("Repeated UQs Shape: ", repeated_uncertainties.shape)
+    # print("First UQ: ", uncertainty[0].item())
+
 
     return render(
         viewpoint_camera=viewpoint_camera,
