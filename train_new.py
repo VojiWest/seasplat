@@ -197,8 +197,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-        img_idx = randint(0, len(viewpoint_stack)-1)
-        viewpoint_cam = viewpoint_stack.pop(img_idx)
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        img_idx = viewpoint_cam.uid
 
         # Render
         render_pkg = render(viewpoint_cam, gaussians, pipe_params, bg)
@@ -1092,8 +1092,11 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     print("Post Processing Filtering Gaussians")
 
     filter_path = os.path.join(scene.model_path, "Filtering")
+    hist_path = os.path.join(scene.model_path, "Histogram")
     if not os.path.exists(filter_path):
         os.makedirs(filter_path)
+    if not os.path.exists(hist_path):
+        os.makedirs(hist_path)
 
     # Get filtering variables and thresholds
     filter_criteria = opt_params.filter_criteria
@@ -1108,17 +1111,18 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
     methods = [filter_criteria]
     if depth_weighted:
-        methods.append("depth_weighted")
+        methods.append("depth_weighted_vog")
+        methods.append("depth")
+
+    all_l1_losses = []
+    all_l_ssims = []
+    all_psnrs = []
 
     for method in methods:
-        all_l1_losses = []
-        all_l_ssims = []
-        all_psnrs = []
         for config in validation_configs:
             l1_losses = []
             l_ssims = []
             psnrs = []
-            rendered_uq = False
             for t_idx, threshold in enumerate(filter_thresholds):
                 l1 = 0.0
                 l_ssim = 0.0
@@ -1129,15 +1133,18 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                         tb_writer.add_histogram(f"test_filter/filter_variable_{method}", filter_variable, global_step=iteration)
 
                     for idx, viewpoint in enumerate(config['cameras']):
-                        if method == "depth_weighted":
+                        if method == "depth_weighted_vog":
                             filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint)
+                            threshold = torch.quantile(filter_variable, quantiles[t_idx])
+                        if method == "depth":
+                            filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint)
                             threshold = torch.quantile(filter_variable, quantiles[t_idx])
 
                         # Render image
                         render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
                         render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
 
-                        if "vog" in filter_criteria and rendered_uq == False:
+                        if "vog" in method and "test" in config['name']:
                             render_uncertainty_pkg = render_uncertainty(filter_variable, viewpoint, scene.gaussians, *renderArgs)
                             render_uncertainty_image = render_uncertainty_pkg["render"][0].unsqueeze(0)
 
@@ -1145,7 +1152,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                                 valid_uncertainties = render_uncertainty_image[torch.logical_not(torch.logical_or(torch.isnan(render_uncertainty_image), torch.isinf(render_uncertainty_image)))]
                                 if len(valid_uncertainties) == 0:
                                     print(f"[eval] everything is nan for UQ")
-                                    not_nan_max = 100.0
+                                    not_nan_max = 100.0 # TODO Should look into this value and this general if-statement
                                 else:
                                     not_nan_max = torch.max(valid_uncertainties).item()
                                 render_uncertainty_image = torch.nan_to_num(render_uncertainty_image, not_nan_max, not_nan_max)
@@ -1162,7 +1169,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                         image_alpha = render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
-                        print("Depth Image Min: ", torch.min(depth_image), " Max: ", torch.max(depth_image), " Mean: ", torch.mean(depth_image))
+                        # print("Depth Image Min: ", torch.min(depth_image), " Max: ", torch.max(depth_image), " Mean: ", torch.mean(depth_image))
 
                         if filter_depth:
                             depth_image = depth_image / image_alpha
@@ -1227,7 +1234,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             normalized_bs = backscatter / torch.max(backscatter)
                             underwater_image = torch.clamp(direct + backscatter, 0.0, 1.0)
 
-                        if "test" in config['name'] and bs_model is not None and at_model is not None:
+                        if "test" in config['name'] and "vog" in method and bs_model is not None and at_model is not None:
                             tb_writer.add_images(f"{tag_header}/filtered_underwater_image_{method}", underwater_image, global_step=t_idx)
 
                         # get the groundtruth rgb image
@@ -1245,6 +1252,10 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             l_ssim += ssim(image, gt_image).mean().double()
                             psnr_metric += psnr(image, gt_image).mean().double()
 
+                    # Plot debugging histogram
+                    if "vog" in method and t_idx == 0:
+                        plot_histogram(render_uncertainty_image.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Render", folder_path=hist_path, iteration=iteration)
+
                     l1 /= len(config['cameras'])
                     l_ssim /= len(config['cameras'])
                     psnr_metric /= len(config['cameras'])
@@ -1253,7 +1264,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                     l_ssims.append(l_ssim.cpu().item())
                     psnrs.append(psnr_metric.cpu().item())
 
-                    rendered_uq = True
+            plot_histogram(filter_variable.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Variable", folder_path=hist_path, iteration=iteration) # Only plot once per image (not every threshold since does not change)
 
             all_l1_losses.append(l1_losses)
             all_l_ssims.append(l_ssims)

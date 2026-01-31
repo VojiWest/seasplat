@@ -58,6 +58,8 @@ def get_inter_view_gradient_variance(gradients, method='var'):
             if method == 'sd':
                 sd = torch.std(gaussian_non_zero, dim=0)
                 variances[idx] = sd
+        elif gaussian_non_zero.numel() > 0:
+            variances[idx] = 0
         else:
             variances[idx] = -1
             
@@ -98,6 +100,7 @@ def get_depths(gaussians, viewpoint_camera):
 
 def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_path, iteration, methods, split_names):
     splits = [split_names[0]['name'].split("_")[1], split_names[1]['name'].split("_")[1]]
+    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
 
     # x = filter_thresholds
     x = quantiles
@@ -107,7 +110,7 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_
         linetype = ':'
         if idx % 2 == 1:
             linetype = '-'
-        plt.plot(x, loss, label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
+        plt.plot(x, loss, color=colors[idx // 2], label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
 
     plt.title(title)
     plt.ylabel("L1 Loss")
@@ -121,7 +124,7 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_
         linetype = ':'
         if idx % 2 == 1:
             linetype = '-'
-        plt.plot(x, psnr, label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
+        plt.plot(x, psnr, color=colors[idx // 2], label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
     title = "PSNR Filtering"
     plt.title(title)
     plt.ylabel("PSNR")
@@ -129,4 +132,11 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_
     plt.xlabel(x_label)
     plt.legend()
     plt.savefig(f"{folder_path}/psnr_filter_plot_{iteration}.png")
+    plt.close()
+
+def plot_histogram(data, title, folder_path, iteration):
+    plt.hist(data, bins=100)
+    plt.yscale('log', nonpositive='clip')
+    plt.title(title)
+    plt.savefig(f"{folder_path}/hist_{title}_{iteration}.png")
     plt.close()
