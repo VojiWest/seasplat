@@ -485,13 +485,17 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def add_grad(self, viewspace_point_tensor, visibility_filter, image_idx, num_images):
-        if self.xyz_gradient_individual.shape[0] < 2: # If empty then initialize to shape num_gaussians x num_images
-            self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
-            # print("Expanding Gradient Tracker: ", self.xyz_gradient_individual.shape)
-        # print("Image number: ", image_idx, "out of: ", num_images)
+    def add_grad(self, viewspace_point_tensor, visibility_filter, image_idx, num_images, method="split"):
+        if self.xyz_gradient_individual.shape[0] < 2: 
+            if method == "norm": # If empty then initialize to shape num_gaussians x num_images
+                self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
+            if method == "split":
+                self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images, 2), device="cuda")
 
-        self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)
+        if method == "norm":
+            self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)
+        if method == "split":
+            self.xyz_gradient_individual[visibility_filter, image_idx] = viewspace_point_tensor.grad[visibility_filter,:2]
 
     def reset_grad_tracking(self):
         self.xyz_gradient_individual = torch.empty(0)

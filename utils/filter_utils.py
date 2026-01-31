@@ -1,9 +1,10 @@
 import torch
+import os
 import matplotlib.pyplot as plt
 
 from scene import Scene, GaussianModel
 
-def get_filter_variable(filter_criteria, gaussians : GaussianModel):
+def get_filter_variable(filter_criteria, gaussians : GaussianModel, model_path, iteration):
     if "sd" in filter_criteria:
         if "max" in filter_criteria:
             filter_variable = gaussians.get_sd(method='max')
@@ -13,7 +14,7 @@ def get_filter_variable(filter_criteria, gaussians : GaussianModel):
     if "vog" in filter_criteria:
         grads = gaussians.get_inter_view_gradients()
         if "viewpoint" in filter_criteria:
-            variance = get_inter_view_gradient_variance(gradients=grads, method='sd')
+            variance = get_inter_view_gradient_variance(gradients=grads, method='sd', model_path=model_path, iteration=iteration)
             return variance
 
 def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp, remove_above_filter=True):
@@ -45,33 +46,58 @@ def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, c
 
     return filtered_means3D, filtered_means2D, filtered_shs, filtered_colors_precomp, filtered_opacity, filtered_scales, filtered_rotations, filtered_cov3D_precomp
 
-def get_inter_view_gradient_variance(gradients, method='var'):
-    variances = torch.zeros(gradients.shape[0])
-    for idx, gaussian_grads in enumerate(gradients):
-        mask = gaussian_grads > 0
-        gaussian_non_zero = gaussian_grads[mask]
+def calculate_spread(gaussian_non_zero, method):
+    if gaussian_non_zero.numel() > 1:
+        if method == 'var':
+            var = torch.var(gaussian_non_zero, dim=0)
+            spread = var
+        elif method == 'sd':
+            sd = torch.std(gaussian_non_zero, dim=0)
+            spread = sd
+    elif gaussian_non_zero.numel() > 0:
+        spread = 0
+    else:
+        spread = -1
 
-        if gaussian_non_zero.numel() > 1:
-            if method == 'var':
-                var = torch.var(gaussian_non_zero, dim=0)
-                variances[idx] = var
-            if method == 'sd':
-                sd = torch.std(gaussian_non_zero, dim=0)
-                variances[idx] = sd
-        elif gaussian_non_zero.numel() > 0:
-            variances[idx] = 0
-        else:
-            variances[idx] = -1
+    return spread
+
+def get_inter_view_gradient_variance(gradients, method='var', model_path="", iteration=0):
+    spreads = torch.zeros(gradients.shape[0])
+    numels = []
+    for idx, gaussian_grads in enumerate(gradients):
+        if gaussian_grads.ndim == 2:
+            g1, g2 = gaussian_grads
+            g1_non_zero = g1[g1 > 0]
+            g2_non_zero = g2[g2 > 0]
+
+            numels.append(g1_non_zero.numel())
+            numels.append(g2_non_zero.numel())
+
+            v1 = calculate_spread(g1_non_zero, method=method)
+            v2 = calculate_spread(g2_non_zero, method=method)
+
+            spreads[idx] = torch.mean(torch.stack([v1, v2]))
+        
+        elif gaussian_grads.ndim == 1:
+            mask = gaussian_grads > 0
+            gaussian_non_zero = gaussian_grads[mask]
+
+            numels.append(gaussian_non_zero.numel())
+
+            spreads[idx] = calculate_spread(gaussian_non_zero, method=method)
+
+    hist_path = os.path.join(model_path, "Histogram")
+    plot_histogram(numels, title="Number of Gradient Samples per Gaussian", folder_path=hist_path, iteration=iteration)
             
-    return variances
+    return spreads
 
 def get_depth_weighted_gradient_variance(variances, gaussians, viewpoint_camera, depth_lambda = 1):
     depths = get_depths(gaussians, viewpoint_camera)
     dw_variances = variances * (depth_lambda / (depths+0.0001))
 
-    print("Variances: ", variances)
-    print("Depths: ", depths)
-    print("Depth Weighted Variances: ", dw_variances)
+    # print("Variances: ", variances)
+    # print("Depths: ", depths)
+    # print("Depth Weighted Variances: ", dw_variances)
 
     return dw_variances
 
