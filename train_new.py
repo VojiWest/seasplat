@@ -521,7 +521,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             # Add gradient for tracking variance
             gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
 
+            print("Num Train Cameras: ", len(scene.getTrainCameras()), "Num Left in Viewpoint_stack: ", len(viewpoint_stack))
             if abs(10000 - (iteration % 10000)) <= len(scene.getTrainCameras()) and not viewpoint_stack:
+                print("It's Filtering Time!")
                 if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                     evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
                             learned_bg, opt_params.learn_background,
@@ -543,7 +545,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 
             if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
                     gaussians.reset_grad_tracking()
-            elif not viewpoint_stack: # Once cycled through all images, reset
+            elif iteration > opt_params.densify_until_iter and not viewpoint_stack: # Once cycled through all images, reset
                     gaussians.reset_grad_tracking()
 
             # Densification

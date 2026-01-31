@@ -66,7 +66,9 @@ def get_inter_view_gradient_variance(gradients, method='var', model_path="", ite
     numels = []
     for idx, gaussian_grads in enumerate(gradients):
         if gaussian_grads.ndim == 2:
-            g1, g2 = gaussian_grads
+            g1 = gaussian_grads[:,0]
+            g2 = gaussian_grads[:,1]
+            
             g1_non_zero = g1[g1 > 0]
             g2_non_zero = g2[g2 > 0]
 
