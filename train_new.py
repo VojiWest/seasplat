@@ -541,11 +541,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                             depth_weighted=opt_params.depth_weighted_filtering
                             )
                 
-            if iteration <= opt_params.densify_until_iter:
-                if iteration % opt_params.densification_interval == 0:
+            if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
                     gaussians.reset_grad_tracking()
-            else:
-                if not viewpoint_stack: # Once cycled through all images, reset
+            elif not viewpoint_stack: # Once cycled through all images, reset
                     gaussians.reset_grad_tracking()
 
             # Densification
@@ -1100,7 +1098,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
     # Get filtering variables and thresholds
     filter_criteria = opt_params.filter_criteria
-    filter_variable = get_filter_variable(filter_criteria, scene.gaussians)
+    filter_variable = get_filter_variable(filter_criteria, scene.gaussians, model_path=scene.model_path, iteration=iteration)
     filter_variable_const = filter_variable.clone()
     print("Filtering Based on: ", filter_criteria)
     print("Filter Variable Shape: ", filter_variable.shape)
