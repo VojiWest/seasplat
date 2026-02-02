@@ -210,7 +210,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 # do not use learned background; rely on backscatter to hopefully fill this in
                 image = rendered_image
                 if not done_binf_init_with_bg:
-                    print(f"[{iteration} updated bs_model B_inf with learnred_bg parameters {torch.sigmoid(learned_bg)}")
+                    print(f"[{iteration}] updated bs_model B_inf with learnred_bg parameters {torch.sigmoid(learned_bg)}")
                     bs_model.B_inf = torch.nn.Parameter(torch.clone(learned_bg.data).reshape(3, 1, 1)).cuda()
                     bs_optimizer = torch.optim.Adam(bs_model.parameters(), lr=opt_params.bs_at_lr)
                     done_binf_init_with_bg = True
@@ -521,8 +521,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             # Add gradient for tracking variance
             gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
 
-            print("Num Train Cameras: ", len(scene.getTrainCameras()), "Num Left in Viewpoint_stack: ", len(viewpoint_stack))
-            if abs(10000 - (iteration % 10000)) <= len(scene.getTrainCameras()) and not viewpoint_stack:
+            # print("Num Train Cameras: ", len(scene.getTrainCameras()), "Num added to grad tracker: ", torch.count_nonzero(gaussians.img_idxs_grads_stored))
+            # TODO Fix when this if statement is triggered (specifically the first part)
+            if abs(10000 - (iteration % 10000)) <= 5 * len(scene.getTrainCameras()) and torch.count_nonzero(gaussians.img_idxs_grads_stored) == (len(scene.getTrainCameras())):
                 print("It's Filtering Time!")
                 if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                     evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
@@ -545,7 +546,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 
             if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
                     gaussians.reset_grad_tracking()
-            elif iteration > opt_params.densify_until_iter and not viewpoint_stack: # Once cycled through all images, reset
+            elif iteration > opt_params.densify_until_iter and torch.count_nonzero(gaussians.img_idxs_grads_stored) == (len(scene.getTrainCameras())): # Once cycled through all images, reset
                     gaussians.reset_grad_tracking()
 
             # Densification

@@ -54,6 +54,7 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.xyz_gradient_individual = torch.empty(0)
+        self.img_idxs_grads_stored = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -487,16 +488,20 @@ class GaussianModel:
 
     def add_grad(self, viewspace_point_tensor, visibility_filter, image_idx, num_images, method="split"):
         if self.xyz_gradient_individual.shape[0] < 2: 
+            self.img_idxs_grads_stored = torch.zeros(num_images)
             if method == "norm": # If empty then initialize to shape num_gaussians x num_images
-                self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images), device="cuda")
+                self.xyz_gradient_individual = torch.full((self.get_xyz.shape[0], num_images), fill_value=float('nan'), dtype=torch.float32, device="cuda")
             if method == "split":
-                self.xyz_gradient_individual = torch.zeros((self.get_xyz.shape[0], num_images, 2), device="cuda")
+                self.xyz_gradient_individual = torch.full((self.get_xyz.shape[0], num_images, 2), fill_value=float('nan'), dtype=torch.float32, device="cuda")
 
         if method == "norm":
             self.xyz_gradient_individual[visibility_filter, image_idx] = torch.norm(viewspace_point_tensor.grad[visibility_filter,:2], dim=-1)
         if method == "split":
             self.xyz_gradient_individual[visibility_filter, image_idx] = viewspace_point_tensor.grad[visibility_filter,:2]
 
+        self.img_idxs_grads_stored[image_idx] = 1
+
     def reset_grad_tracking(self):
         self.xyz_gradient_individual = torch.empty(0)
+        self.img_idxs_grads_stored = torch.empty(0)
 

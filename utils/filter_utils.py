@@ -55,9 +55,9 @@ def calculate_spread(gaussian_non_zero, method):
             sd = torch.std(gaussian_non_zero, dim=0)
             spread = sd
     elif gaussian_non_zero.numel() > 0:
-        spread = 0
+        spread = torch.tensor(0.0, device=gaussian_non_zero.device, dtype=gaussian_non_zero.dtype)
     else:
-        spread = -1
+        spread = torch.tensor(-1.0, device=gaussian_non_zero.device, dtype=gaussian_non_zero.dtype)
 
     return spread
 
@@ -68,20 +68,23 @@ def get_inter_view_gradient_variance(gradients, method='var', model_path="", ite
         if gaussian_grads.ndim == 2:
             g1 = gaussian_grads[:,0]
             g2 = gaussian_grads[:,1]
-            
-            g1_non_zero = g1[g1 > 0]
-            g2_non_zero = g2[g2 > 0]
 
-            numels.append(g1_non_zero.numel())
-            numels.append(g2_non_zero.numel())
+            mask_g1 = ~torch.isnan(g1)
+            mask_g2 = ~torch.isnan(g2)
 
-            v1 = calculate_spread(g1_non_zero, method=method)
-            v2 = calculate_spread(g2_non_zero, method=method)
+            g1_valid = g1[mask_g1]
+            g2_valid = g2[mask_g2]
+
+            numels.append(g1_valid.numel())
+            numels.append(g2_valid.numel())
+
+            v1 = calculate_spread(g1_valid, method=method)
+            v2 = calculate_spread(g2_valid, method=method)
 
             spreads[idx] = torch.mean(torch.stack([v1, v2]))
         
         elif gaussian_grads.ndim == 1:
-            mask = gaussian_grads > 0
+            mask = ~torch.isnan(gaussian_grads)
             gaussian_non_zero = gaussian_grads[mask]
 
             numels.append(gaussian_non_zero.numel())
