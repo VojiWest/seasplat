@@ -4,18 +4,20 @@ import matplotlib.pyplot as plt
 
 from scene import Scene, GaussianModel
 
-def get_filter_variable(filter_criteria, gaussians : GaussianModel, model_path, iteration):
-    if "sd" in filter_criteria:
-        if "max" in filter_criteria:
+def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path, iteration):
+    if "sd" in filter_criterion:
+        if "max" in filter_criterion:
             filter_variable = gaussians.get_sd(method='max')
-        elif "mean" in filter_criteria:
+        elif "mean" in filter_criterion:
             filter_variable = gaussians.get_sd(method='mean')
         return filter_variable
-    if "vog" in filter_criteria:
+    if "vog" in filter_criterion:
         grads = gaussians.get_inter_view_gradients()
-        if "viewpoint" in filter_criteria:
+        if "viewpoint" in filter_criterion:
             variance = get_inter_view_gradient_variance(gradients=grads, method='sd', model_path=model_path, iteration=iteration)
             return variance
+    if "random" in filter_criterion:
+        return torch.rand(gaussians.get_xyz.shape[0])
 
 def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp, remove_above_filter=True):
     if remove_above_filter:
@@ -110,7 +112,7 @@ def homogenize_points(points):
     """Convert batched points (xyz) to (xyz1)."""
     return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
 
-def get_depths(gaussians, viewpoint_camera):
+def get_depths(gaussians, viewpoint_camera, norm=False):
     # Taken from gaussian_rendeder
 
     points_world = gaussians.get_xyz # torch.Size([25837, 3]), torch.float32
@@ -125,9 +127,12 @@ def get_depths(gaussians, viewpoint_camera):
     points_cam = points_cam_homogenized[:, :3]
 
     # get the zs and use as color for rendering
-    zs = points_cam[:, 2]
+    if norm:
+        depths = torch.norm(points_cam, dim=-1)
+    else:
+        depths = points_cam[:, 2]
 
-    return zs.cpu()
+    return depths.cpu()
 
 def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, psnrs, folder_path, iteration, methods, split_names):
     splits = [split_names[0]['name'].split("_")[1], split_names[1]['name'].split("_")[1]]
