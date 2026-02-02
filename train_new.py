@@ -15,6 +15,7 @@ import glob
 import json
 from pathlib import Path
 import torch
+from torchvision.utils import save_image
 from typing import List
 from random import randint
 from utils.loss_utils import l1_loss, ssim, depth_weighted_l1_loss, depth_weighted_l2_loss
@@ -1094,32 +1095,33 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
     filter_path = os.path.join(scene.model_path, "Filtering")
     hist_path = os.path.join(scene.model_path, "Histogram")
+    image_path = os.path.join(scene.model_path, "Renders")
     if not os.path.exists(filter_path):
         os.makedirs(filter_path)
     if not os.path.exists(hist_path):
         os.makedirs(hist_path)
+    if not os.path.exists(image_path):
+        os.makedirs(image_path)
 
-    # Get filtering variables and thresholds
-    filter_criteria = opt_params.filter_criteria
-    filter_variable = get_filter_variable(filter_criteria, scene.gaussians, model_path=scene.model_path, iteration=iteration)
-    filter_variable_const = filter_variable.clone()
-    print("Filtering Based on: ", filter_criteria)
-    print("Filter Variable Shape: ", filter_variable.shape)
-    print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
-    # filter_thresholds = torch.linspace(min_value, max_value, steps=20)
+    methods = opt_params.filter_criteria.split(",")
+
     quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
-    filter_thresholds = torch.quantile(filter_variable, quantiles)
-
-    methods = [filter_criteria]
-    if depth_weighted:
-        methods.append("depth_weighted_vog")
-        methods.append("depth")
 
     all_l1_losses = []
     all_l_ssims = []
     all_psnrs = []
 
     for method in methods:
+        # Get filtering variables and thresholds based on method
+        if "depth" not in method:
+            filter_variable = get_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
+            if method == "depth_weighted_vog":
+                filter_variable_const = filter_variable.clone()
+            print("Filtering Based on: ", method)
+            print("Filter Variable Shape: ", filter_variable.shape)
+            print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
+            filter_thresholds = torch.quantile(filter_variable, quantiles)
+
         for config in validation_configs:
             l1_losses = []
             l_ssims = []
@@ -1138,7 +1140,10 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint)
                             threshold = torch.quantile(filter_variable, quantiles[t_idx])
                         if method == "depth":
-                            filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint)
+                            if "z" in method:
+                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint) # TODO I don't think this really gets true depth, only z coord
+                            elif "norm" in method:
+                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, norm=True)
                             threshold = torch.quantile(filter_variable, quantiles[t_idx])
 
                         # Render image
@@ -1165,12 +1170,13 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             # tb_writer.add_images(f"{tag_header}/uncertainty", render_uncertainty_image[None], global_step=iteration)
                             tb_writer.add_images(f"{tag_header}/normalized_uncertainty_{method}", normalized_render_uncertainty_image[None], global_step=iteration)
                             
+                            image_name = "norm_uq_" + method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + ".png"
+                            save_image(normalized_render_uncertainty_image, f"{image_path}/{image_name}")
+                            
 
                         rendered_image = render_pkg["render"]
                         image_alpha = render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
-
-                        # print("Depth Image Min: ", torch.min(depth_image), " Max: ", torch.max(depth_image), " Mean: ", torch.mean(depth_image))
 
                         if filter_depth:
                             depth_image = depth_image / image_alpha
