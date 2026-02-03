@@ -184,7 +184,7 @@ class OptimizationParams(ParamGroup):
         self.do_z_score = False               # z threshold direct image to +/- 5 stdevs
 
         # Filtering
-        self.filter_criteria = "viewpoint_vog,depth_zs_weighted_viewpoint_vog,depth_norm_weighted_viewpoint_vog,depth_zs,depth_norm,sd_max,sd_mean,random" # iteration_vog,depth_weighted_iteration_vog,
+        self.filter_criteria = "grad_norm,inverse_viewpoint_vog,viewpoint_vog,depth_zs_weighted_viewpoint_vog,depth_norm_weighted_viewpoint_vog,depth_zs,depth_norm,sd_max,sd_mean,random" # iteration_vog,depth_weighted_iteration_vog,
         self.depth_weighted_filtering = True
 
         super().__init__(parser, "Optimization Parameters")

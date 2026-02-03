@@ -11,6 +11,7 @@ def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path,
         elif "mean" in filter_criterion:
             filter_variable = gaussians.get_sd(method='mean')
         return filter_variable
+    
     if "vog" in filter_criterion:
         if "viewpoint" in filter_criterion:
             grads = gaussians.get_inter_view_gradients()
@@ -19,6 +20,12 @@ def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path,
             grads = gaussians.get_inter_iter_gradients()
             variance = get_inter_view_gradient_variance(gradients=grads, method='sd', model_path=model_path, iteration=iteration)
         return variance
+    
+    if "grad" in filter_criterion:
+        grads = gaussians.get_inter_view_gradients()
+        norm = get_mean_gradient_norm(gradients=grads)
+        return norm
+
     if "random" in filter_criterion:
         return torch.rand(gaussians.get_xyz.shape[0])
 
@@ -100,6 +107,30 @@ def get_inter_view_gradient_variance(gradients, method='var', model_path="", ite
     plot_histogram(numels, title="Number of Gradient Samples per Gaussian", folder_path=hist_path, iteration=iteration)
             
     return spreads
+
+def get_mean_gradient_norm(gradients):
+    norms = torch.zeros(gradients.shape[0])
+    for idx, gaussian_grads in enumerate(gradients):
+        if gaussian_grads.ndim == 2:
+            g1 = gaussian_grads[:,0]
+            g2 = gaussian_grads[:,1]
+
+            mask_g1 = ~torch.isnan(g1)
+            mask_g2 = ~torch.isnan(g2)
+
+            g1_valid = g1[mask_g1]
+            g2_valid = g2[mask_g2]
+
+            norms[idx] = torch.mean(torch.norm(torch.stack([g1_valid, g2_valid]), dim=0))
+        
+        elif gaussian_grads.ndim == 1:
+            mask = ~torch.isnan(gaussian_grads)
+            gaussian_non_zero = gaussian_grads[mask]
+
+            norms[idx] = torch.mean(gaussian_non_zero)
+            
+    return norms
+
 
 def get_depth_weighted_gradient_variance(variances, gaussians, viewpoint_camera, depth_cal = "zs", depth_lambda = 1):
     depths = get_depths(gaussians, viewpoint_camera, depth_cal)
