@@ -520,11 +520,13 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
 
             # VOG Tracking
             # Add gradient for tracking variance
-            gaussians.add_grad(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
+            gaussians.add_grads_cam(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
+            # gaussians.add_grads_iter(viewspace_point_tensor, visibility_filter, num_iters=500)
 
-            # print("Num Train Cameras: ", len(scene.getTrainCameras()), "Num added to grad tracker: ", torch.count_nonzero(gaussians.img_idxs_grads_stored))
             # TODO Fix when this if statement is triggered (specifically the first part)
-            if abs(10000 - (iteration % 10000)) <= 5 * len(scene.getTrainCameras()) and torch.count_nonzero(gaussians.img_idxs_grads_stored) == (len(scene.getTrainCameras())):
+            timing_condition = abs(10000 - (iteration % 10000)) <= 5 * len(scene.getTrainCameras())
+            grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
+            if timing_condition and grads_cam_condition:
                 print("It's Filtering Time!")
                 if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
                     evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
@@ -546,9 +548,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                             )
                 
             if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
-                    gaussians.reset_grad_tracking()
-            elif iteration > opt_params.densify_until_iter and torch.count_nonzero(gaussians.img_idxs_grads_stored) == (len(scene.getTrainCameras())): # Once cycled through all images, reset
-                    gaussians.reset_grad_tracking()
+                    gaussians.reset_grad_cam_tracking()
+            elif iteration > opt_params.densify_until_iter and torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras())): # Once cycled through all images, reset
+                    gaussians.reset_grad_cam_tracking()
 
             # Densification
             if iteration < opt_params.densify_until_iter:
@@ -1096,12 +1098,15 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     filter_path = os.path.join(scene.model_path, "Filtering")
     hist_path = os.path.join(scene.model_path, "Histogram")
     image_path = os.path.join(scene.model_path, "Renders")
+    uq_path = os.path.join(scene.model_path, "Uncertainty")
     if not os.path.exists(filter_path):
         os.makedirs(filter_path)
     if not os.path.exists(hist_path):
         os.makedirs(hist_path)
     if not os.path.exists(image_path):
         os.makedirs(image_path)
+    if not os.path.exists(uq_path):
+        os.makedirs(uq_path)
 
     methods = opt_params.filter_criteria.split(",")
 
@@ -1110,22 +1115,27 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     all_l1_losses = []
     all_l_ssims = []
     all_psnrs = []
+    all_lpipses = []
 
     for method in methods:
         # Get filtering variables and thresholds based on method
-        if "depth" not in method:
+        if method != "depth_zs" and method != "depth_norm":
             filter_variable = get_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
-            if method == "depth_weighted_vog":
+            if "depth_weighted" in method:
                 filter_variable_const = filter_variable.clone()
             print("Filtering Based on: ", method)
             print("Filter Variable Shape: ", filter_variable.shape)
             print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
-            filter_thresholds = torch.quantile(filter_variable, quantiles)
+            if "inverse" in method:
+                filter_thresholds = torch.quantile(filter_variable, 1-quantiles)
+            else:
+                filter_thresholds = torch.quantile(filter_variable, quantiles)
 
         for config in validation_configs:
             l1_losses = []
             l_ssims = []
             psnrs = []
+            lpipses = []
             for t_idx, threshold in enumerate(filter_thresholds):
                 l1 = 0.0
                 l_ssim = 0.0
@@ -1136,19 +1146,27 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                         tb_writer.add_histogram(f"test_filter/filter_variable_{method}", filter_variable, global_step=iteration)
 
                     for idx, viewpoint in enumerate(config['cameras']):
-                        if method == "depth_weighted_vog":
-                            filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint)
-                            threshold = torch.quantile(filter_variable, quantiles[t_idx])
-                        if method == "depth":
-                            if "z" in method:
-                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint) # TODO I don't think this really gets true depth, only z coord
-                            elif "norm" in method:
-                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, norm=True)
-                            threshold = torch.quantile(filter_variable, quantiles[t_idx])
+                        if "depth" in method: # TODO Need to reverse filtering since want to filter out least deep not most deep (done I think)
+                            depth_measure = method.split("_")[1]
+                            if "depth_weighted" in method:
+                                filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
+                                threshold = torch.quantile(filter_variable, quantiles[t_idx])
+                            if method == "depth_zs":
+                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure) # TODO I don't think this really gets true depth, only z coord
+                                threshold = torch.quantile(filter_variable, 1.0-quantiles[t_idx])
+                            if method == "depth_norm":
+                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
+                                threshold = torch.quantile(filter_variable, 1.0-quantiles[t_idx])
 
                         # Render image
-                        render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
-                        render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold)
+                        remove_high = method not in ["depth_zs", "depth_norm", "inverse_viewpoint_vog"]
+
+                        render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
+                        render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
+
+                        visibility = render_pkg["visibility_filter"]
+                        num_gaussians_rendered = visibility.sum().item()
+                        print(f"{num_gaussians_rendered} Gaussians Rendered - Img {idx} - Method {method} - Threshold {threshold}")
 
                         if "vog" in method and "test" in config['name']:
                             render_uncertainty_pkg = render_uncertainty(filter_variable, viewpoint, scene.gaussians, *renderArgs)
@@ -1171,7 +1189,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             tb_writer.add_images(f"{tag_header}/normalized_uncertainty_{method}", normalized_render_uncertainty_image[None], global_step=iteration)
                             
                             image_name = "norm_uq_" + method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + ".png"
-                            save_image(normalized_render_uncertainty_image, f"{image_path}/{image_name}")
+                            save_image(normalized_render_uncertainty_image, f"{uq_path}/{image_name}")
                             
 
                         rendered_image = render_pkg["render"]
@@ -1244,6 +1262,10 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                         if "test" in config['name'] and "vog" in method and bs_model is not None and at_model is not None:
                             tb_writer.add_images(f"{tag_header}/filtered_underwater_image_{method}", underwater_image, global_step=t_idx)
 
+                        if "test" in config['name'] and (idx == 0 or idx == 6 or idx == 13):
+                            image_name = method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + "_" + str(t_idx) + ".png"
+                            save_image(underwater_image, f"{image_path}/{image_name}")
+
                         # get the groundtruth rgb image
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                         if viewpoint.original_depth_image is not None:
@@ -1254,10 +1276,12 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                             l1 += l1_loss(underwater_image.squeeze(), gt_image).mean().double()
                             l_ssim += ssim(underwater_image.squeeze(), gt_image).mean().double()
                             psnr_metric += psnr(underwater_image.squeeze(), gt_image).mean().double()
+                            lpips_metric += lpips(underwater_image.squeeze(), gt_image, net_type='vgg')
                         else:
                             l1 += l1_loss(image, gt_image).mean().double()
                             l_ssim += ssim(image, gt_image).mean().double()
                             psnr_metric += psnr(image, gt_image).mean().double()
+                            lpips_metric += lpips(image, gt_image, net_type='vgg')
 
                     # Plot debugging histogram
                     if "vog" in method and t_idx == 0:
@@ -1266,21 +1290,24 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
                     l1 /= len(config['cameras'])
                     l_ssim /= len(config['cameras'])
                     psnr_metric /= len(config['cameras'])
+                    lpips_metric /= len(config['cameras'])
 
                     l1_losses.append(l1.cpu().item())
                     l_ssims.append(l_ssim.cpu().item())
                     psnrs.append(psnr_metric.cpu().item())
+                    lpipses.append(lpips_metric)
 
             plot_histogram(filter_variable.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Variable", folder_path=hist_path, iteration=iteration) # Only plot once per image (not every threshold since does not change)
 
             all_l1_losses.append(l1_losses)
             all_l_ssims.append(l_ssims)
             all_psnrs.append(psnrs)
+            all_lpipses.append(lpipses)
 
             print("PSNRS: ", psnrs)
             print("Thresholds: ", filter_thresholds)
     
-    plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_psnrs, filter_path, iteration, methods, validation_configs)
+    plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
 
 
                         

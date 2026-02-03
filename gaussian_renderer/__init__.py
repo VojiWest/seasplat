@@ -16,7 +16,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.filter_utils import filter_gaussians
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, filter_criteria=None, filter_threshold=None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, filter_criteria=None, filter_threshold=None, filter_high=True):
     """
     Render the scene.
 
@@ -95,7 +95,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             opacity = opacity,
             scales = scales,
             rotations = rotations,
-            cov3D_precomp = cov3D_precomp
+            cov3D_precomp = cov3D_precomp,
+            remove_above_filter=filter_high
         )
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
@@ -122,7 +123,7 @@ def homogenize_points(points):
     return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
 
 
-def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None):
+def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None, filter_high=True):
     '''
     Use the original gaussian splatting renderer but just pass in
     a color override with precomputed colors as depth
@@ -153,6 +154,7 @@ def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Te
         override_color=repeated_zs,
         filter_criteria=filter_criteria, 
         filter_threshold=filter_threshold,
+        filter_high=filter_high
     )
 
 def render_uncertainty(uncertainty, viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, filter_criteria=None, filter_threshold=None):
