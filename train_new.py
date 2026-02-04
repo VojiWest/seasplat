@@ -25,6 +25,8 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
+import time
+
 from utils.general_utils import inverse_sigmoid
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
@@ -166,6 +168,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     at_update_iter = 0
     at_inited = False
     bs_inited = False
+
+    evaluated_20k = False
+    evaluated_30k = False 
 
     update_gs_color_counter = 0
     adjust_gs_colors_for_cc = False
@@ -519,38 +524,44 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 )
 
             # VOG Tracking
-            # Add gradient for tracking variance
-            gaussians.add_grads_cam(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
-            # gaussians.add_grads_iter(viewspace_point_tensor, visibility_filter, num_iters=500)
+            if opt_params.do_filtering == True:
+                # Add gradient for tracking variance
+                gaussians.add_grads_cam(viewspace_point_tensor, visibility_filter, img_idx, len(scene.getTrainCameras()))
+                if iteration > opt_params.densify_until_iter:
+                    gaussians.add_grads_iter(viewspace_point_tensor, visibility_filter, num_iters=500)
 
-            # TODO Fix when this if statement is triggered (specifically the first part)
-            timing_condition = abs(10000 - (iteration % 10000)) <= 5 * len(scene.getTrainCameras())
-            grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
-            if timing_condition and grads_cam_condition:
-                print("It's Filtering Time!")
-                if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
-                    evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
-                            learned_bg, opt_params.learn_background,
-                            opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
-                            opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs,
-                            bs_model, at_model,
-                            opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
-                            depth_alpha_threshold=opt_params.depth_alpha_threshold,
-                            depth_weighted=opt_params.depth_weighted_filtering
-                            )
-                else:
-                    evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene, render, (pipe_params, background),
-                            learned_bg, opt_params.learn_background,
-                            opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
-                            filter_depth=opt_params.filter_depth,
-                            depth_alpha_threshold=opt_params.depth_alpha_threshold,
-                            depth_weighted=opt_params.depth_weighted_filtering
-                            )
-                
-            if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
-                    gaussians.reset_grad_cam_tracking()
-            elif iteration > opt_params.densify_until_iter and torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras())): # Once cycled through all images, reset
-                    gaussians.reset_grad_cam_tracking()
+                # TODO Fix when this if statement is triggered (specifically the first part)
+                timing_condition_1 = 0 < 20000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_20k
+                timing_condition_2 = 0 < 30000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_30k
+                grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
+                if (timing_condition_1 or timing_condition_2) and grads_cam_condition:
+                    print("It's Filtering Time!")
+                    if iteration < 20000:
+                        evaluated_20k = True
+                    elif iteration < 30000:
+                        evaluated_30k = True
+
+                    if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
+                        evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene, render, (pipe_params, background),
+                                learned_bg, opt_params.learn_background,
+                                opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                                opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs,
+                                bs_model, at_model,
+                                opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
+                                depth_alpha_threshold=opt_params.depth_alpha_threshold
+                                )
+                    else:
+                        evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene, render, (pipe_params, background),
+                                learned_bg, opt_params.learn_background,
+                                opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                                filter_depth=opt_params.filter_depth,
+                                depth_alpha_threshold=opt_params.depth_alpha_threshold
+                                )
+                    
+                if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
+                        gaussians.reset_grad_cam_tracking()
+                elif iteration > opt_params.densify_until_iter and torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras())): # Once cycled through all images, reset
+                        gaussians.reset_grad_cam_tracking()
 
             # Densification
             if iteration < opt_params.densify_until_iter:
@@ -1079,14 +1090,86 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
-def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterations, scene : Scene, renderFunc, renderArgs,
+def apply_at_and_bs(viewpoint, image, at_model, bs_model, use_gt_depth=False, disable_attenuation=False, do_z_score=False):
+    if use_gt_depth:
+        assert viewpoint.original_depth_image is not None
+        depth_image = viewpoint.original_depth_image.cuda()
+    depth_batch = torch.unsqueeze(depth_image, dim=0)
+    rgb_batch = torch.unsqueeze(image, dim=0)
+    if disable_attenuation:
+        attenuation_map = torch.ones_like(rgb_batch)
+    else:
+        attenuation_map = at_model(depth_batch)
+    direct = rgb_batch * attenuation_map
+    attenuation_map_normalized = attenuation_map / torch.max(attenuation_map)
+
+    if do_z_score:
+        direct_mean = direct.mean(dim=[2, 3], keepdim=True)
+        direct_std = direct.std(dim=[2, 3], keepdim=True)
+        direct_z = (direct - direct_mean) / direct_std
+        clamped_z = torch.clamp(direct_z, -5, 5)
+        direct_filtered = torch.clamp(
+            (clamped_z * direct_std) + torch.maximum(direct_mean, torch.Tensor([1. / 255]).cuda()), 0, 1)
+        direct = direct_filtered
+
+    backscatter = bs_model(depth_batch)
+    normalized_bs = backscatter / torch.max(backscatter)
+    underwater_image = torch.clamp(direct + backscatter, 0.0, 1.0)
+
+    return underwater_image
+
+def filter_depth_render(depth_image, image_alpha, depth_norm_value, norm_depth_max):
+    depth_image = depth_image / image_alpha
+    if torch.any(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image))):
+        valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
+        if len(valid_depth_vals) == 0:
+            print(f"[eval] everything is nan")
+            not_nan_max = 100.0
+        else:
+            not_nan_max = torch.max(valid_depth_vals).item()
+        depth_image = torch.nan_to_num(depth_image, not_nan_max, not_nan_max)
+    depth_image = depth_image / depth_norm_value
+    if norm_depth_max:
+        if depth_image.min() != depth_image.max():
+            depth_image = (depth_image - depth_image.min()) / (depth_image.max() - depth_image.min())
+        else:
+            depth_image = depth_image / depth_image.max()
+
+    return depth_image
+
+def get_rendered_uncertainty(viewpoint, scene : Scene, renderArgs, uq_variable, method, iteration, uq_path, save=True):
+    render_uncertainty_pkg = render_uncertainty(uq_variable, viewpoint, scene.gaussians, *renderArgs)
+    render_uncertainty_image = render_uncertainty_pkg["render"][0].unsqueeze(0)
+
+    if torch.any(torch.logical_or(torch.isnan(render_uncertainty_image), torch.isinf(render_uncertainty_image))):
+        valid_uncertainties = render_uncertainty_image[torch.logical_not(torch.logical_or(torch.isnan(render_uncertainty_image), torch.isinf(render_uncertainty_image)))]
+        if len(valid_uncertainties) == 0:
+            print(f"[eval] everything is nan for UQ")
+            not_nan_max = 100.0 # TODO Should look into this value and this general if-statement
+        else:
+            not_nan_max = torch.max(valid_uncertainties).item()
+        render_uncertainty_image = torch.nan_to_num(render_uncertainty_image, not_nan_max, not_nan_max)
+
+    normalized_render_uncertainty_image = torch.clamp(render_uncertainty_image / torch.max(render_uncertainty_image), 0.0, 1.0)
+
+    # Save to tensorboard
+    # tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
+    # tb_writer.add_images(f"{tag_header}/normalized_uncertainty_{method}", normalized_render_uncertainty_image[None], global_step=iteration)
+    
+    if save:
+        image_name = "norm_uq_" + method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + ".png"
+        save_image(normalized_render_uncertainty_image, f"{uq_path}/{image_name}")
+
+    return render_uncertainty_image
+
+
+def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene, renderFunc, renderArgs,
                     learned_bg, do_learn_bg,
                     depth_norm_value=1.0, norm_depth_max=False, use_gt_depth=False,
                     do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
                     bs_model=None, at_model=None,
                     do_z_score=False, filter_depth=False, disable_attenuation=False,
                     depth_alpha_threshold=0.0,
-                    depth_weighted=False,
 ):
     torch.cuda.empty_cache()
     assert not torch.is_grad_enabled()
@@ -1095,21 +1178,9 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
     print("Post Processing Filtering Gaussians")
 
-    filter_path = os.path.join(scene.model_path, "Filtering")
-    hist_path = os.path.join(scene.model_path, "Histogram")
-    image_path = os.path.join(scene.model_path, "Renders")
-    uq_path = os.path.join(scene.model_path, "Uncertainty")
-    if not os.path.exists(filter_path):
-        os.makedirs(filter_path)
-    if not os.path.exists(hist_path):
-        os.makedirs(hist_path)
-    if not os.path.exists(image_path):
-        os.makedirs(image_path)
-    if not os.path.exists(uq_path):
-        os.makedirs(uq_path)
+    filter_path, hist_path, image_path, uq_path = create_paths()
 
     methods = opt_params.filter_criteria.split(",")
-
     quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
 
     all_l1_losses = []
@@ -1117,13 +1188,12 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
     all_psnrs = []
     all_lpipses = []
 
-    for method in methods:
-        # Get filtering variables and thresholds based on method
+    for method in methods: # Get filtering variables and thresholds based on method
+        print("Filtering Based on: ", method)
         if method != "depth_zs" and method != "depth_norm":
             filter_variable = get_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
-            if "depth_weighted" in method:
+            if "depth" in method and "weighted" in method:
                 filter_variable_const = filter_variable.clone()
-            print("Filtering Based on: ", method)
             print("Filter Variable Shape: ", filter_variable.shape)
             print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
             if "inverse" in method:
@@ -1135,24 +1205,21 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
             l1_losses = []
             l_ssims = []
             psnrs = []
-            lpipses = []
+            # lpipses = []
             for t_idx, threshold in enumerate(filter_thresholds):
                 l1 = 0.0
                 l_ssim = 0.0
                 psnr_metric = 0.0
+                # lpips_metric = 0.0
                 if config['cameras'] and len(config['cameras']) > 0:
-                    # Save histogram of variable
-                    if "test" in config['name']:
-                        tb_writer.add_histogram(f"test_filter/filter_variable_{method}", filter_variable, global_step=iteration)
-
                     for idx, viewpoint in enumerate(config['cameras']):
-                        if "depth" in method: # TODO Need to reverse filtering since want to filter out least deep not most deep (done I think)
+                        if "depth" in method:
                             depth_measure = method.split("_")[1]
-                            if "depth_weighted" in method:
+                            if "weighted" in method:
                                 filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
                                 threshold = torch.quantile(filter_variable, quantiles[t_idx])
                             if method == "depth_zs":
-                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure) # TODO I don't think this really gets true depth, only z coord
+                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure) # TODO filtering out lowest zs is just negative values, prolly wanna do lowest positive values
                                 threshold = torch.quantile(filter_variable, 1.0-quantiles[t_idx])
                             if method == "depth_norm":
                                 filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
@@ -1160,71 +1227,26 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
                         # Render image
                         remove_high = method not in ["depth_zs", "depth_norm", "inverse_viewpoint_vog"]
-
                         render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
                         render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
-
-                        visibility = render_pkg["visibility_filter"]
-                        num_gaussians_rendered = visibility.sum().item()
-                        print(f"{num_gaussians_rendered} Gaussians Rendered - Img {idx} - Method {method} - Threshold {threshold}")
+                        num_gaussians_rendered = render_pkg["visibility_filter"].sum().item()
 
                         if "vog" in method and "test" in config['name']:
-                            render_uncertainty_pkg = render_uncertainty(filter_variable, viewpoint, scene.gaussians, *renderArgs)
-                            render_uncertainty_image = render_uncertainty_pkg["render"][0].unsqueeze(0)
-
-                            if torch.any(torch.logical_or(torch.isnan(render_uncertainty_image), torch.isinf(render_uncertainty_image))):
-                                valid_uncertainties = render_uncertainty_image[torch.logical_not(torch.logical_or(torch.isnan(render_uncertainty_image), torch.isinf(render_uncertainty_image)))]
-                                if len(valid_uncertainties) == 0:
-                                    print(f"[eval] everything is nan for UQ")
-                                    not_nan_max = 100.0 # TODO Should look into this value and this general if-statement
-                                else:
-                                    not_nan_max = torch.max(valid_uncertainties).item()
-                                render_uncertainty_image = torch.nan_to_num(render_uncertainty_image, not_nan_max, not_nan_max)
-
-                            normalized_render_uncertainty_image = torch.clamp(render_uncertainty_image / torch.max(render_uncertainty_image), 0.0, 1.0)
-
-                            # Save to tensorboard
-                            tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
-                            # tb_writer.add_images(f"{tag_header}/uncertainty", render_uncertainty_image[None], global_step=iteration)
-                            tb_writer.add_images(f"{tag_header}/normalized_uncertainty_{method}", normalized_render_uncertainty_image[None], global_step=iteration)
-                            
-                            image_name = "norm_uq_" + method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + ".png"
-                            save_image(normalized_render_uncertainty_image, f"{uq_path}/{image_name}")
-                            
+                            render_uncertainty_image = get_rendered_uncertainty(viewpoint, scene, renderArgs, filter_variable, method, iteration, uq_path)
 
                         rendered_image = render_pkg["render"]
                         image_alpha = render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
                         if filter_depth:
-                            depth_image = depth_image / image_alpha
-                            if torch.any(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image))):
-                                valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
-                                if len(valid_depth_vals) == 0:
-                                    print(f"[eval] everything is nan")
-                                    not_nan_max = 100.0
-                                else:
-                                    not_nan_max = torch.max(valid_depth_vals).item()
-                                depth_image = torch.nan_to_num(depth_image, not_nan_max, not_nan_max)
-                            depth_image = depth_image / depth_norm_value
-                            if norm_depth_max:
-                                if depth_image.min() != depth_image.max():
-                                    depth_image = (depth_image - depth_image.min()) / (depth_image.max() - depth_image.min())
-                                else:
-                                    depth_image = depth_image / depth_image.max()
-
-                            depth_mask = image_alpha.detach() > depth_alpha_threshold
-                            masked_depth_image = depth_image * depth_mask
-                            normalized_masked_depth_image = torch.clamp(masked_depth_image / torch.max(masked_depth_image), 0.0, 1.0)
+                            depth_image = filter_depth_render(depth_image, image_alpha, depth_norm_value, norm_depth_max)
 
                         if do_learn_bg:
                             if bg_from_bs and do_seathru and iteration > seathru_from_iter:
-                                bg_image = torch.zeros_like(rendered_image) * 1.0
                                 image = rendered_image
                             else:
                                 bg_image = torch.sigmoid(learned_bg).reshape(3, 1, 1) * (1 - image_alpha)
                                 image = rendered_image + bg_image
-                            clamped_bg_image = torch.clamp(bg_image, 0.0, 1.0)
                         else:
                             image = rendered_image
 
@@ -1234,33 +1256,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
                         # implement the forward process here
                         if bs_model is not None and at_model is not None:
-                            if use_gt_depth:
-                                assert viewpoint.original_depth_image is not None
-                                depth_image = viewpoint.original_depth_image.cuda()
-                            depth_batch = torch.unsqueeze(depth_image, dim=0)
-                            rgb_batch = torch.unsqueeze(image, dim=0)
-                            if disable_attenuation:
-                                attenuation_map = torch.ones_like(rgb_batch)
-                            else:
-                                attenuation_map = at_model(depth_batch)
-                            direct = rgb_batch * attenuation_map
-                            attenuation_map_normalized = attenuation_map / torch.max(attenuation_map)
-
-                            if do_z_score:
-                                direct_mean = direct.mean(dim=[2, 3], keepdim=True)
-                                direct_std = direct.std(dim=[2, 3], keepdim=True)
-                                direct_z = (direct - direct_mean) / direct_std
-                                clamped_z = torch.clamp(direct_z, -5, 5)
-                                direct_filtered = torch.clamp(
-                                    (clamped_z * direct_std) + torch.maximum(direct_mean, torch.Tensor([1. / 255]).cuda()), 0, 1)
-                                direct = direct_filtered
-
-                            backscatter = bs_model(depth_batch)
-                            normalized_bs = backscatter / torch.max(backscatter)
-                            underwater_image = torch.clamp(direct + backscatter, 0.0, 1.0)
-
-                        if "test" in config['name'] and "vog" in method and bs_model is not None and at_model is not None:
-                            tb_writer.add_images(f"{tag_header}/filtered_underwater_image_{method}", underwater_image, global_step=t_idx)
+                            underwater_image = apply_at_and_bs(viewpoint, image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
                         if "test" in config['name'] and (idx == 0 or idx == 6 or idx == 13):
                             image_name = method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + "_" + str(t_idx) + ".png"
@@ -1268,41 +1264,39 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, testing_iterat
 
                         # get the groundtruth rgb image
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                        if viewpoint.original_depth_image is not None:
-                            gt_depth_image = viewpoint.original_depth_image.to("cuda")
-                            gt_normalized_depth_image = torch.clamp(gt_depth_image / torch.max(gt_depth_image), 0.0, 1.0)
 
                         if bs_model is not None and at_model is not None:
                             l1 += l1_loss(underwater_image.squeeze(), gt_image).mean().double()
                             l_ssim += ssim(underwater_image.squeeze(), gt_image).mean().double()
                             psnr_metric += psnr(underwater_image.squeeze(), gt_image).mean().double()
-                            lpips_metric += lpips(underwater_image.squeeze(), gt_image, net_type='vgg')
+                            # lpips_metric += lpips(underwater_image.squeeze(), gt_image, net_type='vgg').mean().double()
                         else:
                             l1 += l1_loss(image, gt_image).mean().double()
                             l_ssim += ssim(image, gt_image).mean().double()
                             psnr_metric += psnr(image, gt_image).mean().double()
-                            lpips_metric += lpips(image, gt_image, net_type='vgg')
+                            # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
                     # Plot debugging histogram
                     if "vog" in method and t_idx == 0:
+                        tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
                         plot_histogram(render_uncertainty_image.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Render", folder_path=hist_path, iteration=iteration)
 
                     l1 /= len(config['cameras'])
                     l_ssim /= len(config['cameras'])
                     psnr_metric /= len(config['cameras'])
-                    lpips_metric /= len(config['cameras'])
+                    # lpips_metric /= len(config['cameras'])
 
                     l1_losses.append(l1.cpu().item())
                     l_ssims.append(l_ssim.cpu().item())
                     psnrs.append(psnr_metric.cpu().item())
-                    lpipses.append(lpips_metric)
+                    # lpipses.append(lpips_metric.cpu().item())
 
             plot_histogram(filter_variable.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Variable", folder_path=hist_path, iteration=iteration) # Only plot once per image (not every threshold since does not change)
 
             all_l1_losses.append(l1_losses)
             all_l_ssims.append(l_ssims)
             all_psnrs.append(psnrs)
-            all_lpipses.append(lpipses)
+            # all_lpipses.append(lpipses)
 
             print("PSNRS: ", psnrs)
             print("Thresholds: ", filter_thresholds)

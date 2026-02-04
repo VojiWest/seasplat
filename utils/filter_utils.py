@@ -4,6 +4,22 @@ import matplotlib.pyplot as plt
 
 from scene import Scene, GaussianModel
 
+def create_paths(scene : Scene):
+    filter_path = os.path.join(scene.model_path, "Filtering")
+    hist_path = os.path.join(scene.model_path, "Histogram")
+    image_path = os.path.join(scene.model_path, "Renders")
+    uq_path = os.path.join(scene.model_path, "Uncertainty")
+    if not os.path.exists(filter_path):
+        os.makedirs(filter_path)
+    if not os.path.exists(hist_path):
+        os.makedirs(hist_path)
+    if not os.path.exists(image_path):
+        os.makedirs(image_path)
+    if not os.path.exists(uq_path):
+        os.makedirs(uq_path)
+
+    return filter_path, hist_path, image_path, uq_path
+
 def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path, iteration):
     if "sd" in filter_criterion:
         if "max" in filter_criterion:
@@ -115,19 +131,22 @@ def get_mean_gradient_norm(gradients):
             g1 = gaussian_grads[:,0]
             g2 = gaussian_grads[:,1]
 
-            mask_g1 = ~torch.isnan(g1)
-            mask_g2 = ~torch.isnan(g2)
+            mask = ~torch.isnan(g1) & ~torch.isnan(g2)
 
-            g1_valid = g1[mask_g1]
-            g2_valid = g2[mask_g2]
-
-            norms[idx] = torch.mean(torch.norm(torch.stack([g1_valid, g2_valid]), dim=0))
+            if mask.any():
+                g_valid = gaussian_grads[mask]
+                norms[idx] = torch.mean(torch.norm(g_valid, dim=1))
+            else:
+                norms[idx] = 0.0
         
         elif gaussian_grads.ndim == 1:
             mask = ~torch.isnan(gaussian_grads)
             gaussian_non_zero = gaussian_grads[mask]
 
-            norms[idx] = torch.mean(gaussian_non_zero)
+            if gaussian_non_zero.numel() > 0:
+                norms[idx] = torch.mean(gaussian_non_zero)
+            else:
+                norms[idx] = 0.0
             
     return norms
 
@@ -170,7 +189,7 @@ def get_depths(gaussians, viewpoint_camera, depth_cal="zs"):
 
 def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, all_lpipses, psnrs, folder_path, iteration, methods, split_names):
     splits = [split_names[0]['name'].split("_")[1], split_names[1]['name'].split("_")[1]]
-    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
+    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k', 'tab:orange', 'tab:purple', 'tab:brown', 'tab:pink', 'tab:gray', 'tab:olive']
 
     # x = filter_thresholds
     x = quantiles
@@ -187,7 +206,7 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, all_lpipses, p
     plt.xlabel(x_label)
     # plt.tight_layout()
     plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    plt.savefig(f"{folder_path}/loss_filter_plot_{iteration}.png")
+    plt.savefig(f"{folder_path}/loss_filter_plot_{iteration}.png", bbox_inches='tight')
     plt.close()
 
     title = "PSNR Filtering"
@@ -202,23 +221,23 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, all_lpipses, p
     plt.xlabel(x_label)
     # plt.tight_layout()
     plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    plt.savefig(f"{folder_path}/psnr_filter_plot_{iteration}.png")
+    plt.savefig(f"{folder_path}/psnr_filter_plot_{iteration}.png", bbox_inches='tight')
     plt.close()
 
-    title = "LPIPS Filtering"
-    for idx, lpipses in enumerate(all_lpipses):
-        linetype = ':'
-        if idx % 2 == 1:
-            linetype = '-'
-        plt.plot(x, lpipses, color=colors[idx // 2], label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
-    plt.title(title)
-    plt.ylabel("LPIPS")
-    x_label = "Percentile Kept"
-    plt.xlabel(x_label)
-    # plt.tight_layout()
-    plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    plt.savefig(f"{folder_path}/lpips_filter_plot_{iteration}.png")
-    plt.close()
+    # title = "LPIPS Filtering"
+    # for idx, lpipses in enumerate(all_lpipses):
+    #     linetype = ':'
+    #     if idx % 2 == 1:
+    #         linetype = '-'
+    #     plt.plot(x, lpipses, color=colors[idx // 2], label = splits[idx % 2] + " " + methods[idx // 2], linestyle=linetype)
+    # plt.title(title)
+    # plt.ylabel("LPIPS")
+    # x_label = "Percentile Kept"
+    # plt.xlabel(x_label)
+    # # plt.tight_layout()
+    # plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    # plt.savefig(f"{folder_path}/lpips_filter_plot_{iteration}.png")
+    # plt.close()
 
     title = "SSIM Filtering"
     for idx, ssim in enumerate(l_ssims):
@@ -232,7 +251,7 @@ def plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, all_lpipses, p
     plt.xlabel(x_label)
     # plt.tight_layout()
     plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    plt.savefig(f"{folder_path}/ssim_filter_plot_{iteration}.png")
+    plt.savefig(f"{folder_path}/ssim_filter_plot_{iteration}.png", bbox_inches='tight')
     plt.close()
 
 def plot_histogram(data, title, folder_path, iteration):
