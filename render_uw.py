@@ -126,6 +126,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
     timings_3dgs = []
     timings_seathru = []
 
+    renders = []
+
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         start_time = time.time()
         render_pkg = render(view, gaussians, pipeline, render_background)
@@ -182,6 +184,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
                 torchvision.utils.save_image(underwater_image_batch.squeeze(), with_water_dir / f"{view.image_name}.JPG")
             else:
                 torchvision.utils.save_image(underwater_image_batch.squeeze(), with_water_dir / f"{view.image_name}.png")
+            renders.append(underwater_image_batch.squeeze())
 
         if save_as_jpeg:
             torchvision.utils.save_image(rendered_image, render_dir / f"{view.image_name}.JPG")
@@ -195,6 +198,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
     if do_seathru:
         print(f"[Seathru] Average time for {len(views)} images: {np.mean(timings_seathru)}")
     print(f"[3DGS] Average time for {len(views)} images: {np.mean(timings_3dgs)}")
+
+    return renders
 
 def render_sets(
         model_params : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool,
