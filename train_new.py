@@ -63,7 +63,9 @@ from lpipsPyTorch import lpips
 from metrics import readImages, read_image
 from render_uw import estimate_atmospheric_light, render_set
 from utils.sh_utils import SH2RGB
-from utils.filter_utils import *
+from utils.filter_utils import create_paths, save_render
+from utils.plot_utils import plot_filter, plot_histogram
+from filtering.filter import get_filter_variable, get_depth_specific_filter_variable
 
 
 def training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -83,6 +85,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     tb_writer = prepare_output_and_logger(model_params)
     gaussians = GaussianModel(model_params.sh_degree, opt_params.do_isotropic)
     scene = Scene(model_params, gaussians, shuffle=opt_params.shuffle)
+    if opt_params.jitter_init:
+        torch.manual_seed(seed=opt_params.seed)
+        gaussians.sample_init_points()
 
     # deep see color
     if opt_params.do_seathru:
@@ -642,7 +647,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if not skip_eval_train:
         metrics_dirs = [train_image_dir]
         with torch.no_grad():
-            render_set(
+            train_renders = render_set(
                 Path(model_params.model_path), "train", iteration, scene.getTrainCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -658,7 +663,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if model_params.eval:
         test_image_dir = Path(model_params.model_path) / "test" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            render_set(
+            test_renders = render_set(
                 Path(model_params.model_path), "test", iteration, scene.getTestCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -709,6 +714,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     results_file = Path(model_params.model_path) / "eval_metrics.json"
     with open(str(results_file), 'w') as f:
         json.dump(results, f)
+
+    return train_renders, test_renders
 
 
 def prepare_output_and_logger(args):
@@ -1176,67 +1183,36 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
     validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
                             {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
 
-    print("Post Processing Filtering Gaussians")
-
     filter_path, hist_path, image_path, uq_path = create_paths()
-
     methods = opt_params.filter_criteria.split(",")
     quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
+    all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
 
-    all_l1_losses = []
-    all_l_ssims = []
-    all_psnrs = []
-    all_lpipses = []
-
-    for method in methods: # Get filtering variables and thresholds based on method
+    for method in methods:
         print("Filtering Based on: ", method)
-        if method != "depth_zs" and method != "depth_norm":
-            filter_variable = get_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
-            if "depth" in method and "weighted" in method:
-                filter_variable_const = filter_variable.clone()
-            print("Filter Variable Shape: ", filter_variable.shape)
-            print("Number of No-Variance: ", torch.sum(filter_variable < 0).item(), "out of ", filter_variable.numel())
-            if "inverse" in method:
-                filter_thresholds = torch.quantile(filter_variable, 1-quantiles)
-            else:
-                filter_thresholds = torch.quantile(filter_variable, quantiles)
+        if method != "depth_zs" and method != "depth_norm":  # Get filtering variables and thresholds based on method
+            filter_variable, filter_variable_const, filter_thresholds = get_filter_variable(method, quantiles, scene, iteration)
 
         for config in validation_configs:
-            l1_losses = []
-            l_ssims = []
-            psnrs = []
+            l1_losses, l_ssims, psnrs = [], [], []
             # lpipses = []
             for t_idx, threshold in enumerate(filter_thresholds):
-                l1 = 0.0
-                l_ssim = 0.0
-                psnr_metric = 0.0
+                l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
                 # lpips_metric = 0.0
                 if config['cameras'] and len(config['cameras']) > 0:
                     for idx, viewpoint in enumerate(config['cameras']):
                         if "depth" in method:
-                            depth_measure = method.split("_")[1]
-                            if "weighted" in method:
-                                filter_variable = get_depth_weighted_gradient_variance(variances=filter_variable_const, gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
-                                threshold = torch.quantile(filter_variable, quantiles[t_idx])
-                            if method == "depth_zs":
-                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure) # TODO filtering out lowest zs is just negative values, prolly wanna do lowest positive values
-                                threshold = torch.quantile(filter_variable, 1.0-quantiles[t_idx])
-                            if method == "depth_norm":
-                                filter_variable = get_depths(gaussians=scene.gaussians, viewpoint_camera=viewpoint, depth_cal=depth_measure)
-                                threshold = torch.quantile(filter_variable, 1.0-quantiles[t_idx])
+                            filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, t_idx)
 
-                        # Render image
+                        # Render image and depth
                         remove_high = method not in ["depth_zs", "depth_norm", "inverse_viewpoint_vog"]
                         render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
                         render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
-                        num_gaussians_rendered = render_pkg["visibility_filter"].sum().item()
+                        rendered_image, image_alpha = render_pkg["render"], render_pkg["alpha"]
+                        depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
                         if "vog" in method and "test" in config['name']:
                             render_uncertainty_image = get_rendered_uncertainty(viewpoint, scene, renderArgs, filter_variable, method, iteration, uq_path)
-
-                        rendered_image = render_pkg["render"]
-                        image_alpha = render_pkg["alpha"]
-                        depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
                         if filter_depth:
                             depth_image = filter_depth_render(depth_image, image_alpha, depth_norm_value, norm_depth_max)
@@ -1259,8 +1235,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             underwater_image = apply_at_and_bs(viewpoint, image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
                         if "test" in config['name'] and (idx == 0 or idx == 6 or idx == 13):
-                            image_name = method + "_no_{}".format(viewpoint.image_name) + "_" + str(iteration) + "_" + str(t_idx) + ".png"
-                            save_image(underwater_image, f"{image_path}/{image_name}")
+                            save_render(underwater_image, image_path, viewpoint, method, iteration, t_idx)
 
                         # get the groundtruth rgb image
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -1304,6 +1279,14 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
     plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
 
 
+def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, num_models = 5):
+    all_train_renders, all_test_renders = [], []
+    for m_idx in num_models:
+        train_renders, test_renders = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
+        all_train_renders.append(train_renders)
+        all_test_renders.append(test_renders)
+    
+    pass
                         
 
 if __name__ == "__main__":
