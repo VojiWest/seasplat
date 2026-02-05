@@ -12,6 +12,7 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+# from diff_gaussian_rasterization_abs import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.filter_utils import filter_gaussians
@@ -23,7 +24,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     Background tensor (bg_color) must be on GPU!
     """
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    # screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros((pc.get_xyz.shape[0], 4), dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+
     try:
         screenspace_points.retain_grad()
     except:
@@ -144,6 +147,9 @@ def render_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Te
     # get the zs and use as color for rendering
     zs = points_cam[:, 2].unsqueeze(-1)
     repeated_zs = zs.repeat(1, 3)
+
+    # depths = torch.norm(points_cam, dim=-1).unsqueeze(-1)
+    # repeated_zs = depths.repeat(1, 3)
 
     return render(
         viewpoint_camera=viewpoint_camera,
