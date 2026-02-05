@@ -156,6 +156,14 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
+    def sample_init_points(self):
+        # Perturb initial Gaussians by sampling from them to create new center coord, for random initialization ensembeling
+        print("Jittering Initial Gaussian Points")
+        with torch.no_grad():
+            means = self._xyz
+            stds = torch.exp(self._scaling)
+            self._xyz.copy_(torch.normal(mean=means, std=stds))
+
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
