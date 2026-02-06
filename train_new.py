@@ -65,6 +65,7 @@ from render_uw import estimate_atmospheric_light, render_set
 from utils.sh_utils import SH2RGB
 from utils.filter_utils import create_paths, save_render
 from utils.plot_utils import plot_filter, plot_histogram
+from utils.ensemble_utils import * 
 from filtering.filter import get_filter_variable, get_depth_specific_filter_variable
 
 
@@ -86,7 +87,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     gaussians = GaussianModel(model_params.sh_degree, opt_params.do_isotropic)
     scene = Scene(model_params, gaussians, shuffle=opt_params.shuffle)
     if opt_params.jitter_init:
-        torch.manual_seed(seed=opt_params.seed)
+        # torch.manual_seed(seed=opt_params.seed)
         gaussians.sample_init_points()
 
     # deep see color
@@ -535,7 +536,6 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 if iteration > opt_params.densify_until_iter:
                     gaussians.add_grads_iter(viewspace_point_tensor, visibility_filter, num_iters=500)
 
-                # TODO Fix when this if statement is triggered (specifically the first part)
                 timing_condition_1 = 0 < 20000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_20k
                 timing_condition_2 = 0 < 30000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_30k
                 grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
@@ -1183,7 +1183,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
     validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
                             {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
 
-    filter_path, hist_path, image_path, uq_path = create_paths()
+    filter_path, hist_path, image_path, uq_path = create_paths(scene)
     methods = opt_params.filter_criteria.split(",")
     quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
     all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
@@ -1279,14 +1279,19 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
     plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
 
 
-def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, num_models = 5):
+def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, model_path, num_models = 5):
+    ens_path = create_ens_path(model_path)
     all_train_renders, all_test_renders = [], []
-    for m_idx in num_models:
+    for m_idx in range(num_models):
         train_renders, test_renders = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
         all_train_renders.append(train_renders)
         all_test_renders.append(test_renders)
+
+    mean, var = get_ensemble_variance(all_test_renders)
+    save_ens_uncertainty(var, ens_path)
+    save_ens_mean_pred(mean, ens_path)
+
     
-    pass
                         
 
 if __name__ == "__main__":
@@ -1306,6 +1311,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--exp", type=str, default = "test")
     parser.add_argument("--seed", type=int, default = -1)
+    parser.add_argument("--ens",  action='store_true', default=False)
     args = parser.parse_args(sys.argv[1:])
     args.test_iterations.insert(0, 1)
     args.save_iterations.append(args.iterations)
@@ -1330,17 +1336,11 @@ if __name__ == "__main__":
     # Print out all the parameters in the run
     for k,v in vars(args).items():
         print(f"{k}: {v}")
-
-    training(
-        lp.extract(args),
-        op.extract(args),
-        pp.extract(args),
-        args.test_iterations,
-        args.save_iterations,
-        args.checkpoint_iterations,
-        args.start_checkpoint,
-        args.debug_from
-    )
+        
+    if args.ens:
+        ensemble(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.model_path)
+    else:
+        training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
     print("\nTraining complete.")

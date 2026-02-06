@@ -21,12 +21,12 @@ def create_paths(scene : Scene):
 
     return filter_path, hist_path, image_path, uq_path
 
-def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path, iteration):
-    if "sd" in filter_criterion:
-        if "max" in filter_criterion:
-            filter_variable = gaussians.get_sd(method='max')
-        elif "mean" in filter_criterion:
-            filter_variable = gaussians.get_sd(method='mean')
+def calculate_filter_variable(filter_criterion, gaussians : GaussianModel, model_path, iteration):
+    if "sd_max" in filter_criterion:
+        filter_variable = gaussians.get_sd(method='max')
+        return filter_variable
+    elif "mean" in filter_criterion:
+        filter_variable = gaussians.get_sd(method='mean')
         return filter_variable
     
     if "vog" in filter_criterion:
@@ -49,6 +49,8 @@ def get_filter_variable(filter_criterion, gaussians : GaussianModel, model_path,
 
     if "random" in filter_criterion:
         return torch.rand(gaussians.get_xyz.shape[0])
+    
+    return torch.rand(gaussians.get_xyz.shape[0])
 
 def filter_gaussians(filter_criteria, filter_threshold, means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp, remove_above_filter=True):
     if remove_above_filter:

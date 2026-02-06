@@ -3,7 +3,7 @@ import torch
 from utils.filter_utils import *
 
 def get_filter_variable(method, quantiles, scene, iteration):
-    filter_variable = get_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
+    filter_variable = calculate_filter_variable(method, scene.gaussians, model_path=scene.model_path, iteration=iteration)
     # if "depth" in method and "weighted" in method:
     filter_variable_const = filter_variable.clone()
     print("Filter Variable Shape: ", filter_variable.shape)

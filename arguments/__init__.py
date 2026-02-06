@@ -190,7 +190,6 @@ class OptimizationParams(ParamGroup):
 
         # Ensembeling
         self.jitter_init = False
-        self.seed = 22
 
         super().__init__(parser, "Optimization Parameters")
 

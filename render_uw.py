@@ -184,6 +184,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
                 torchvision.utils.save_image(underwater_image_batch.squeeze(), with_water_dir / f"{view.image_name}.JPG")
             else:
                 torchvision.utils.save_image(underwater_image_batch.squeeze(), with_water_dir / f"{view.image_name}.png")
+            print("UW Image Shape: ", underwater_image_batch.squeeze().shape)
             renders.append(underwater_image_batch.squeeze())
 
         if save_as_jpeg:
