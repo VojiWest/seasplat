@@ -126,7 +126,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
     timings_3dgs = []
     timings_seathru = []
 
-    renders = []
+    renders = torch.empty(0)
+    img_names = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         start_time = time.time()
@@ -136,6 +137,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
         depth_image = depth_image / image_alpha
         end_3dgs = time.time()
+
+        if renders.shape[0] < 2:
+            img_dims = rendered_image.shape
+            renders = torch.zeros((len(views), *img_dims))
+
         if torch.any(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image))):
             # print(f"nans/infs in depth image")
             valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
@@ -185,7 +191,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
             else:
                 torchvision.utils.save_image(underwater_image_batch.squeeze(), with_water_dir / f"{view.image_name}.png")
             print("UW Image Shape: ", underwater_image_batch.squeeze().shape)
-            renders.append(underwater_image_batch.squeeze())
+            renders[idx] = underwater_image_batch.squeeze()
+            img_names.append(view.image_name)
 
         if save_as_jpeg:
             torchvision.utils.save_image(rendered_image, render_dir / f"{view.image_name}.JPG")
@@ -200,7 +207,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
         print(f"[Seathru] Average time for {len(views)} images: {np.mean(timings_seathru)}")
     print(f"[3DGS] Average time for {len(views)} images: {np.mean(timings_3dgs)}")
 
-    return renders
+    return renders, img_names
 
 def render_sets(
         model_params : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool,

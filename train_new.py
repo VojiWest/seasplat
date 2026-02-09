@@ -633,8 +633,12 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         at_model = None
 
     skip_eval_train = False
-    if 'metashape' in str(model_params.model_path):
+    if model_params.skip_eval_train:
         skip_eval_train = True
+
+    # skip_eval_train = False
+    # if 'metashape' in str(model_params.model_path):
+    #     skip_eval_train = True
 
     train_image_dir = Path(model_params.model_path) / "train" / f"{'with_water' if opt_params.do_seathru else 'render'}"
     gt_dir = Path(model_params.source_path) / model_params.images
@@ -647,7 +651,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if not skip_eval_train:
         metrics_dirs = [train_image_dir]
         with torch.no_grad():
-            train_renders = render_set(
+            train_renders, train_image_names = render_set(
                 Path(model_params.model_path), "train", iteration, scene.getTrainCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -658,12 +662,14 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 save_as_jpeg=use_jpeg,
             )
     else:
+        train_renders = []
         metrics_dirs = []
+        train_image_names = []
 
     if model_params.eval:
         test_image_dir = Path(model_params.model_path) / "test" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            test_renders = render_set(
+            test_renders, test_image_names = render_set(
                 Path(model_params.model_path), "test", iteration, scene.getTestCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -715,7 +721,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     with open(str(results_file), 'w') as f:
         json.dump(results, f)
 
-    return train_renders, test_renders
+    return train_renders, train_image_names, test_renders, test_image_names
 
 
 def prepare_output_and_logger(args):
@@ -1097,7 +1103,7 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
-def apply_at_and_bs(viewpoint, image, at_model, bs_model, use_gt_depth=False, disable_attenuation=False, do_z_score=False):
+def apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=False, disable_attenuation=False, do_z_score=False):
     if use_gt_depth:
         assert viewpoint.original_depth_image is not None
         depth_image = viewpoint.original_depth_image.cuda()
@@ -1185,7 +1191,8 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 
     filter_path, hist_path, image_path, uq_path = create_paths(scene)
     methods = opt_params.filter_criteria.split(",")
-    quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
+    # quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
+    quantiles = torch.tensor([0.25, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1])
     all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
 
     for method in methods:
@@ -1205,7 +1212,10 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, t_idx)
 
                         # Render image and depth
-                        remove_high = method not in ["depth_zs", "depth_norm", "inverse_viewpoint_vog"]
+                        if method == "depth_zs" or method == "depth_norm" or "inverse" in method:
+                            remove_high = False
+                        else:
+                            remove_high = True
                         render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
                         render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
                         rendered_image, image_alpha = render_pkg["render"], render_pkg["alpha"]
@@ -1232,7 +1242,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 
                         # implement the forward process here
                         if bs_model is not None and at_model is not None:
-                            underwater_image = apply_at_and_bs(viewpoint, image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
+                            underwater_image = apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
                         if "test" in config['name'] and (idx == 0 or idx == 6 or idx == 13):
                             save_render(underwater_image, image_path, viewpoint, method, iteration, t_idx)
@@ -1252,7 +1262,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
                     # Plot debugging histogram
-                    if "vog" in method and t_idx == 0:
+                    if "vog" in method and t_idx == 0 and "test" in config['name']:
                         tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
                         plot_histogram(render_uncertainty_image.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Render", folder_path=hist_path, iteration=iteration)
 
@@ -1273,7 +1283,8 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
             all_psnrs.append(psnrs)
             # all_lpipses.append(lpipses)
 
-            print("PSNRS: ", psnrs)
+            print("PSNRs: ", psnrs)
+            print("SSIMs: ", l_ssims)
             print("Thresholds: ", filter_thresholds)
     
     plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
@@ -1282,14 +1293,17 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, model_path, num_models = 5):
     ens_path = create_ens_path(model_path)
     all_train_renders, all_test_renders = [], []
+    all_train_image_names, all_test_image_names = [], []
     for m_idx in range(num_models):
-        train_renders, test_renders = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
+        train_renders, train_image_names, test_renders, test_image_names = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
         all_train_renders.append(train_renders)
         all_test_renders.append(test_renders)
+        all_train_image_names.append(train_image_names)
+        all_test_image_names.append(test_image_names)
 
-    mean, var = get_ensemble_variance(all_test_renders)
-    save_ens_uncertainty(var, ens_path)
-    save_ens_mean_pred(mean, ens_path)
+    mean, var, ordered_names = get_ensemble_variance(all_test_renders, all_test_image_names)
+    save_ens_uncertainty(var, ordered_names, ens_path)
+    save_ens_mean_pred(mean, ordered_names, ens_path)
 
     
                         
@@ -1312,35 +1326,37 @@ if __name__ == "__main__":
     parser.add_argument("--exp", type=str, default = "test")
     parser.add_argument("--seed", type=int, default = -1)
     parser.add_argument("--ens",  action='store_true', default=False)
+    parser.add_argument("--reps", type=int, default = 1)
     args = parser.parse_args(sys.argv[1:])
     args.test_iterations.insert(0, 1)
     args.save_iterations.append(args.iterations)
     args.test_iterations.append(args.iterations)
     args.checkpoint_iterations.append(args.iterations)
 
-    now = datetime.now()
-    today = now.strftime("%m%d%Y")
-    args.model_path = str(Path(args.source_path) / "experiments" / today / args.exp)
-    if not os.path.exists(args.model_path):
-        os.makedirs(args.model_path)
+    for _ in range(args.reps):
+        now = datetime.now()
+        today = now.strftime("%m%d%Y")
+        args.model_path = str(Path(args.source_path) / "experiments" / today / args.exp)
+        if not os.path.exists(args.model_path):
+            os.makedirs(args.model_path)
 
-    print("Optimizing " + args.model_path)
+        print("Optimizing " + args.model_path)
 
-    # Initialize system state (RNG)
-    safe_state(args.quiet, args.seed)
+        # Initialize system state (RNG)
+        safe_state(args.quiet, args.seed)
 
-    # Start GUI server, configure and run training
-    network_gui.init(args.ip, args.port)
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+        # Start GUI server, configure and run training
+        network_gui.init(args.ip, args.port)
+        torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    # Print out all the parameters in the run
-    for k,v in vars(args).items():
-        print(f"{k}: {v}")
-        
-    if args.ens:
-        ensemble(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.model_path)
-    else:
-        training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+        # Print out all the parameters in the run
+        for k,v in vars(args).items():
+            print(f"{k}: {v}")
+            
+        if args.ens:
+            ensemble(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.model_path)
+        else:
+            training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
     print("\nTraining complete.")

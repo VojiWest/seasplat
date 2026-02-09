@@ -69,6 +69,9 @@ class ModelParams(ParamGroup):
         self.bb_yhi = 0.0
         self.bb_zlo = 0.0
         self.bb_zhi = 0.0
+
+        self.skip_eval_train = False
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
