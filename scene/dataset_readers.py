@@ -40,6 +40,7 @@ class CameraInfo(NamedTuple):
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
+    val_cameras: list
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
@@ -220,7 +221,7 @@ SEATHRU_NERF_DATASET = {
     },
 }
 
-def readColmapSceneInfo(path, images, eval, llffhold=8, subsample=0, skip_first=0, start_cam=-1, end_cam=-1, rescale_units=1, scene_bounds_xxyyzz=None):
+def readColmapSceneInfo(path, images, eval, val, llffhold=8, subsample=0, skip_first=0, start_cam=-1, end_cam=-1, rescale_units=1, scene_bounds_xxyyzz=None):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -259,8 +260,9 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, subsample=0, skip_first=
         print(f"[Warning] Subsampling dataset and taking every {subsample}th frame! Dataset size from {original_size} to {new_size}")
 
     if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if (idx % llffhold != 0 and idx % llffhold != llffhold // 2)]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        val_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == llffhold // 2]
         # for _, c in enumerate(cam_infos):
         #     if c.image_name in SEATHRU_NERF_DATASET[dataset]['train']:
         #         train_cam_infos.append(c)
@@ -269,8 +271,9 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, subsample=0, skip_first=
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
+        val_cam_infos = []
 
-    print(f"{len(train_cam_infos)} train images and {len(test_cam_infos)} train images")
+    print(f"{len(train_cam_infos)} train images, {len(val_cam_infos)} validation images and {len(test_cam_infos)} test images")
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -291,6 +294,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, subsample=0, skip_first=
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
+                           val_cameras=val_cam_infos,
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
@@ -347,6 +351,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     if not eval:
         train_cam_infos.extend(test_cam_infos)
         test_cam_infos = []
+    val_cam_infos = []
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -369,6 +374,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
+                           val_cameras=val_cam_infos,
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)

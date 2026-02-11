@@ -54,6 +54,7 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        self.val = False
         self.znear=0.01
         self.zfar=100.0
         self.subsample = 0

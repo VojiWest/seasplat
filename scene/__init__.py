@@ -38,9 +38,10 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         self.train_cameras = {}
+        self.val_cameras = {}
         self.test_cameras = {}
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, subsample=args.subsample, skip_first=args.skip_first_n_images, start_cam=args.start_cam, end_cam=args.end_cam, rescale_units=args.rescale_units, scene_bounds_xxyyzz=args.scene_bounds_xxyyzz)
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, args.val, subsample=args.subsample, skip_first=args.skip_first_n_images, start_cam=args.start_cam, end_cam=args.end_cam, rescale_units=args.rescale_units, scene_bounds_xxyyzz=args.scene_bounds_xxyyzz)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
@@ -54,6 +55,8 @@ class Scene:
             camlist = []
             if scene_info.test_cameras:
                 camlist.extend(scene_info.test_cameras)
+            if scene_info.val_cameras:
+                camlist.extend(scene_info.val_cameras)
             if scene_info.train_cameras:
                 camlist.extend(scene_info.train_cameras)
             for id, cam in enumerate(camlist):
@@ -63,6 +66,7 @@ class Scene:
 
         if shuffle:
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+            random.shuffle(scene_info.val_cameras)  # Multi-res consistent random shuffling
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
@@ -70,6 +74,8 @@ class Scene:
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+            print("Loading Val Cameras")
+            self.val_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.val_cameras, resolution_scale, args)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
@@ -91,3 +97,6 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+    
+    def getValCameras(self, scale=1.0):
+        return self.val_cameras[scale]
