@@ -666,6 +666,23 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         metrics_dirs = []
         train_image_names = []
 
+    if model_params.val:
+        val_image_dir = Path(model_params.model_path) / "val" / f"{'with_water' if opt_params.do_seathru else 'render'}"
+        with torch.no_grad():
+            val_renders, val_image_names = render_set(
+                Path(model_params.model_path), "val", iteration, scene.getValCameras(), gaussians, pipe_params, background,
+                opt_params.do_seathru,
+                False,
+                False,
+                learned_bg,
+                bs_model,
+                at_model,
+                save_as_jpeg=use_jpeg,
+            )
+        metrics_dirs.append(val_image_dir)
+    else:
+        val_renders, val_image_names = [], []
+
     if model_params.eval:
         test_image_dir = Path(model_params.model_path) / "test" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
@@ -721,7 +738,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     with open(str(results_file), 'w') as f:
         json.dump(results, f)
 
-    return train_renders, train_image_names, test_renders, test_image_names
+    return train_renders, train_image_names, val_renders, val_image_names, test_renders, test_image_names, scene
 
 
 def prepare_output_and_logger(args):
@@ -831,7 +848,10 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         assert not torch.is_grad_enabled()
+        # validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
+        #                       {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
         validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
+                              {'name': 'eval_val', 'cameras' : scene.getValCameras()},
                               {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
 
         for config in validation_configs:
@@ -1186,7 +1206,9 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 ):
     torch.cuda.empty_cache()
     assert not torch.is_grad_enabled()
-    validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
+    # validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
+    #                         {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
+    validation_configs = ({'name': 'eval_val', 'cameras' : scene.getValCameras()},
                             {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
 
     filter_path, hist_path, image_path, uq_path = create_paths(scene)
@@ -1221,7 +1243,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                         rendered_image, image_alpha = render_pkg["render"], render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
-                        if "vog" in method and "test" in config['name']:
+                        if "vog" in method and ("test" in config['name'] or "val" in config['name']):
                             render_uncertainty_image = get_rendered_uncertainty(viewpoint, scene, renderArgs, filter_variable, method, iteration, uq_path)
 
                         if filter_depth:
@@ -1244,7 +1266,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                         if bs_model is not None and at_model is not None:
                             underwater_image = apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
-                        if "test" in config['name'] and (idx == 0 or idx == 6 or idx == 13):
+                        if ("test" in config['name'] or "val" in config['name']) and (idx == 0 or idx == 6 or idx == 13):
                             save_render(underwater_image, image_path, viewpoint, method, iteration, t_idx)
 
                         # get the groundtruth rgb image
@@ -1262,7 +1284,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
                     # Plot debugging histogram
-                    if "vog" in method and t_idx == 0 and "test" in config['name']:
+                    if "vog" in method and t_idx == 0 and ("test" in config['name'] or "val" in config['name']):
                         tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
                         plot_histogram(render_uncertainty_image.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Render", folder_path=hist_path, iteration=iteration)
 
@@ -1295,7 +1317,7 @@ def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_i
     all_train_renders, all_test_renders = [], []
     all_train_image_names, all_test_image_names = [], []
     for m_idx in range(num_models):
-        train_renders, train_image_names, test_renders, test_image_names = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
+        train_renders, train_image_names, val_renders, val_image_names, test_renders, test_image_names, scene = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
         all_train_renders.append(train_renders)
         all_test_renders.append(test_renders)
         all_train_image_names.append(train_image_names)
@@ -1304,6 +1326,27 @@ def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_i
     mean, var, ordered_names = get_ensemble_variance(all_test_renders, all_test_image_names)
     save_ens_uncertainty(var, ordered_names, ens_path)
     save_ens_mean_pred(mean, ordered_names, ens_path)
+
+    viewpoints = scene.getTestCameras()
+    l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
+    for view in viewpoints:
+        view_name = view.image_name
+        gt_image = torch.clamp(view.original_image.to("cuda"), 0.0, 1.0)
+
+        render_idx = ordered_names.index(view_name)
+        mean_render = mean[render_idx]
+
+        l1 += l1_loss(mean_render, gt_image).mean().double()
+        l_ssim += ssim(mean_render, gt_image).mean().double()
+        psnr_metric += psnr(mean_render, gt_image).mean().double()
+
+    l1 /= len(viewpoints)
+    l_ssim /= len(viewpoints)
+    psnr_metric /= len(viewpoints)
+
+    print("Ensemble L1: ", l1.item())
+    print("Ensemble SSIM: ", l_ssim.item())
+    print("Ensemble PSNR: ", psnr_metric.item())
 
     
                         
