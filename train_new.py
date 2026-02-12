@@ -18,14 +18,14 @@ import torch
 from torchvision.utils import save_image
 from typing import List
 from random import randint
-from utils.loss_utils import l1_loss, ssim, depth_weighted_l1_loss, depth_weighted_l2_loss
+from utils.loss_utils import l1_loss, ssim, depth_weighted_l1_loss, depth_weighted_l2_loss, l2_loss
 from gaussian_renderer import render, render_depth, network_gui, render_uncertainty
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
-import time
+import numpy as np
 
 from utils.general_utils import inverse_sigmoid
 from utils.image_utils import psnr
@@ -67,6 +67,8 @@ from utils.filter_utils import create_paths, save_render
 from utils.plot_utils import plot_filter, plot_histogram
 from utils.ensemble_utils import * 
 from filtering.filter import get_filter_variable, get_depth_specific_filter_variable
+from uq_metrics.auce import auce
+from uq_metrics.ause import ause
 
 
 def training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -1225,6 +1227,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
         for config in validation_configs:
             l1_losses, l_ssims, psnrs = [], [], []
             # lpipses = []
+            ause_metric, auce_metric = 0.0, 0.0
             for t_idx, threshold in enumerate(filter_thresholds):
                 l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
                 # lpips_metric = 0.0
@@ -1283,6 +1286,11 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             psnr_metric += psnr(image, gt_image).mean().double()
                             # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
+                        if "vog" in method and ("test" in config['name'] or "val" in config['name']) and t_idx == 0:
+                            flat_rgb_uncertainty = render_uncertainty_image.repeat(3,1,1).flatten()
+                            ause_metric += ause(flat_rgb_uncertainty, ((underwater_image.squeeze() - gt_image) ** 2).flatten(), err_type="mse")[3]
+                            auce_metric += auce(np.array(underwater_image.squeeze().flatten()), np.array(flat_rgb_uncertainty), np.array(gt_image.flatten()))["auc_abs_error_values"]
+
                     # Plot debugging histogram
                     if "vog" in method and t_idx == 0 and ("test" in config['name'] or "val" in config['name']):
                         tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
@@ -1304,6 +1312,17 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
             all_l_ssims.append(l_ssims)
             all_psnrs.append(psnrs)
             # all_lpipses.append(lpipses)
+
+            if "vog" in method and ("test" in config['name'] or "val" in config['name']):
+                ause_metric /= len(config['cameras'])
+                auce_metric /= len(config['cameras'])
+                print("Ensemble AUSE: ", ause_metric)
+                print("Ensemble AUCE: ", auce_metric)
+
+                metrics = {"AUSE": ause_metric, "AUCE": auce_metric}
+                metrics_file = Path(scene.model_path) / "ensemble_metrics" + str(method) + ".json"
+                with open(str(metrics_file), 'w') as f:
+                    json.dump(metrics, f)
 
             print("PSNRs: ", psnrs)
             print("SSIMs: ", l_ssims)
@@ -1327,26 +1346,45 @@ def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_i
     save_ens_uncertainty(var, ordered_names, ens_path)
     save_ens_mean_pred(mean, ordered_names, ens_path)
 
+
+    ### Get Ensemble Performance Metrics
     viewpoints = scene.getTestCameras()
     l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
+    ause_metric, auce_metric = 0.0, 0.0
     for view in viewpoints:
         view_name = view.image_name
-        gt_image = torch.clamp(view.original_image.to("cuda"), 0.0, 1.0)
+        gt_image = torch.clamp(view.original_image.cpu(), 0.0, 1.0)
 
         render_idx = ordered_names.index(view_name)
         mean_render = mean[render_idx]
+        var_render = var[render_idx]
 
         l1 += l1_loss(mean_render, gt_image).mean().double()
         l_ssim += ssim(mean_render, gt_image).mean().double()
         psnr_metric += psnr(mean_render, gt_image).mean().double()
 
+        ### Get Ensemble UQ Metrics
+        ratio_removed, ause_err, ause_err_by_var, ause_value = ause(var_render.flatten(), ((mean_render - gt_image) ** 2).flatten(), err_type="mse")
+        auce_dict = auce(np.array(mean_render.flatten()), np.array(var_render.flatten()), np.array(gt_image.flatten()))
+        ause_metric += ause_value
+        auce_metric += auce_dict["auc_abs_error_values"]
+
     l1 /= len(viewpoints)
     l_ssim /= len(viewpoints)
     psnr_metric /= len(viewpoints)
+    ause_metric /= len(viewpoints)
+    auce_metric /= len(viewpoints)
 
     print("Ensemble L1: ", l1.item())
     print("Ensemble SSIM: ", l_ssim.item())
     print("Ensemble PSNR: ", psnr_metric.item())
+    print("Ensemble AUSE: ", ause_metric)
+    print("Ensemble AUCE: ", auce_metric)
+
+    metrics = {"SSIM": l_ssim.item(), "PSNR": psnr_metric.item(), "AUSE": ause_metric, "AUCE": auce_metric}
+    metrics_file = Path(model_params.model_path) / "ensemble_metrics.json"
+    with open(str(metrics_file), 'w') as f:
+        json.dump(metrics, f)
 
     
                         
