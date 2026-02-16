@@ -89,7 +89,6 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     gaussians = GaussianModel(model_params.sh_degree, opt_params.do_isotropic)
     scene = Scene(model_params, gaussians, shuffle=opt_params.shuffle)
     if opt_params.jitter_init:
-        # torch.manual_seed(seed=opt_params.seed)
         gaussians.sample_init_points()
 
     # deep see color
@@ -179,6 +178,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
 
     evaluated_20k = False
     evaluated_30k = False 
+
+    min_val_loss = 999999
+    patience = opt_params.patience
 
     update_gs_color_counter = 0
     adjust_gs_colors_for_cc = False
@@ -493,7 +495,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
 
             # Log and save
             if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
-                training_report(
+                val_total_loss = training_report(
                     tb_writer, opt_params, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
                     learned_bg, opt_params.learn_background,
                     rgb_01_loss, rgb_01_criterion,
@@ -514,7 +516,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     recon_depth_loss=dl1,
                 )
             else:
-                training_report(
+                val_total_loss = training_report(
                     tb_writer, opt_params, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe_params, background),
                     learned_bg, opt_params.learn_background,
                     rgb_01_loss, rgb_01_criterion,
@@ -531,6 +533,13 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     recon_depth_loss=dl1,
                 )
 
+            # Early Stopping Tracker
+            if val_total_loss < min_val_loss:
+                min_val_loss = val_total_loss
+                patience = opt_params.patience
+            else:
+                patience -= 1
+
             # VOG Tracking
             if opt_params.do_filtering == True:
                 # Add gradient for tracking variance
@@ -541,7 +550,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 timing_condition_1 = 0 < 20000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_20k
                 timing_condition_2 = 0 < 30000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_30k
                 grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
-                if (timing_condition_1 or timing_condition_2) and grads_cam_condition:
+                if ((timing_condition_1 or timing_condition_2) and grads_cam_condition) or patience == 0:
                     print("It's Filtering Time!")
                     if iteration < 20000:
                         evaluated_20k = True
@@ -620,6 +629,11 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                     torch.save(at_model.state_dict(), f"{scene.model_path}/attenuate_{iteration}.pth")
                 if opt_params.learn_background:
                     torch.save(learned_bg, f"{scene.model_path}/bg_{iteration}.pth")
+
+            # Early Stopping
+            if patience == 0:
+                print("Early Stopping at Iteration:", iteration, ", Validation Loss did not improve for", opt_params.patience, "iterations")
+                break
 
         iteration += 1
 
@@ -723,13 +737,13 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 psnrs.append(psnr(renders[idx], gts[idx]))
                 lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
 
-        print(f"-----------{'Train' if eval_idx == 0 else 'Test'}")
+        print(f"-----------{'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'}")
         print("  SSIM ^: {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
         print("  PSNR ^: {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
         print("  LPIPS v: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
         print("")
 
-        key = 'Train' if eval_idx == 0 else 'Test'
+        key = 'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'
         results[key] = {
             "SSIM": torch.tensor(ssims).mean().item(),
             "PSNR": torch.tensor(psnrs).mean().item(),
@@ -847,6 +861,7 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
 
 
     # Report test and samples of training set
+    val_total_loss = torch.tensor(float('nan'))
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         assert not torch.is_grad_enabled()
@@ -1098,6 +1113,9 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
                         + opt_params.lambda_dssim * (1.0 - l_ssim_test)
                     )
 
+                if "val" in config['name'].split("_")[1]:
+                    val_total_loss = total_loss_test
+
                 # write loss stats to tensorboard
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
@@ -1124,6 +1142,8 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
+
+    return val_total_loss
 
 def apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=False, disable_attenuation=False, do_z_score=False):
     if use_gt_depth:
@@ -1215,8 +1235,8 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 
     filter_path, hist_path, image_path, uq_path = create_paths(scene)
     methods = opt_params.filter_criteria.split(",")
-    # quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
-    quantiles = torch.tensor([0.25, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1])
+    quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
+    # quantiles = torch.tensor([0.25, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1])
     all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
 
     for method in methods:
@@ -1233,20 +1253,23 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                 # lpips_metric = 0.0
                 if config['cameras'] and len(config['cameras']) > 0:
                     for idx, viewpoint in enumerate(config['cameras']):
+                        val_or_test = ("test" in config['name'].split("_")[1] or "val" in config['name'].split("_")[1])
                         if "depth" in method:
                             filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, t_idx)
 
                         # Render image and depth
-                        if method == "depth_zs" or method == "depth_norm" or "inverse" in method:
-                            remove_high = False
+                        remove_high = method != "depth_zs" and method != "depth_norm" and "inverse" not in method
+
+                        if t_idx == len(quantiles) - 1: # Render without filtering
+                            render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
+                            render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs)
                         else:
-                            remove_high = True
-                        render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
-                        render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
+                            render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
+                            render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs, filter_criteria=filter_variable, filter_threshold=threshold, filter_high=remove_high)
                         rendered_image, image_alpha = render_pkg["render"], render_pkg["alpha"]
                         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
 
-                        if "vog" in method and ("test" in config['name'] or "val" in config['name']):
+                        if ("vog" in method or "random" in method) and val_or_test and (t_idx == len(quantiles) - 1):
                             render_uncertainty_image = get_rendered_uncertainty(viewpoint, scene, renderArgs, filter_variable, method, iteration, uq_path)
 
                         if filter_depth:
@@ -1269,7 +1292,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                         if bs_model is not None and at_model is not None:
                             underwater_image = apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
-                        if ("test" in config['name'] or "val" in config['name']) and (idx == 0 or idx == 6 or idx == 13):
+                        if val_or_test and (idx == 0 or idx == 6 or idx == 13):
                             save_render(underwater_image, image_path, viewpoint, method, iteration, t_idx)
 
                         # get the groundtruth rgb image
@@ -1286,13 +1309,13 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             psnr_metric += psnr(image, gt_image).mean().double()
                             # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
-                        if "vog" in method and ("test" in config['name'] or "val" in config['name']) and t_idx == 0:
+                        if "vog" in method and val_or_test and (t_idx == len(quantiles) - 1): # Evaluate UQ
                             flat_rgb_uncertainty = render_uncertainty_image.repeat(3,1,1).flatten()
                             ause_metric += ause(flat_rgb_uncertainty, ((underwater_image.squeeze() - gt_image) ** 2).flatten(), err_type="mse")[3]
-                            auce_metric += auce(np.array(underwater_image.squeeze().flatten()), np.array(flat_rgb_uncertainty), np.array(gt_image.flatten()))["auc_abs_error_values"]
+                            auce_metric += auce(np.array(underwater_image.squeeze().flatten().cpu()), np.array(flat_rgb_uncertainty.cpu()), np.array(gt_image.flatten().cpu()))["auc_abs_error_values"]
 
                     # Plot debugging histogram
-                    if "vog" in method and t_idx == 0 and ("test" in config['name'] or "val" in config['name']):
+                    if "vog" in method and (t_idx == len(quantiles) - 1) and val_or_test:
                         tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
                         plot_histogram(render_uncertainty_image.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Render", folder_path=hist_path, iteration=iteration)
 
@@ -1313,20 +1336,22 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
             all_psnrs.append(psnrs)
             # all_lpipses.append(lpipses)
 
-            if "vog" in method and ("test" in config['name'] or "val" in config['name']):
+            print("PSNRs: ", psnrs)
+            print("SSIMs: ", l_ssims)
+            print("Thresholds: ", filter_thresholds)
+
+            if "vog" in method and val_or_test:
+                print("Split: ", config['name'])
                 ause_metric /= len(config['cameras'])
                 auce_metric /= len(config['cameras'])
                 print("Ensemble AUSE: ", ause_metric)
                 print("Ensemble AUCE: ", auce_metric)
 
                 metrics = {"AUSE": ause_metric, "AUCE": auce_metric}
-                metrics_file = Path(scene.model_path) / "ensemble_metrics" + str(method) + ".json"
+                file_name = "ensemble_metrics" + str(method) + "_" + config['name'].split("_")[1] + ".json"
+                metrics_file = Path(scene.model_path) / file_name
                 with open(str(metrics_file), 'w') as f:
                     json.dump(metrics, f)
-
-            print("PSNRs: ", psnrs)
-            print("SSIMs: ", l_ssims)
-            print("Thresholds: ", filter_thresholds)
     
     plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
 
@@ -1336,6 +1361,7 @@ def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_i
     all_train_renders, all_test_renders = [], []
     all_train_image_names, all_test_image_names = [], []
     for m_idx in range(num_models):
+        torch.cuda.empty_cache()
         train_renders, train_image_names, val_renders, val_image_names, test_renders, test_image_names, scene = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
         all_train_renders.append(train_renders)
         all_test_renders.append(test_renders)

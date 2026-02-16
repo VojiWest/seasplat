@@ -195,6 +195,9 @@ class OptimizationParams(ParamGroup):
         # Ensembeling
         self.jitter_init = False
 
+        # Early Stopping
+        self.patience = 3
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
