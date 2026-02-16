@@ -15,6 +15,7 @@ def new_plot_filter(filter_thresholds, quantiles, l1_losses, l_ssims, all_lpipse
         "inverse_viewpoint_vog_var" : "Inverse VOG",
         "inverse_viewpoint_vog_sd" : "Inverse SDOG",
         "viewpoint_vog_var" : "VOG",
+        "viewpoint_vog" : "VOG",
         "viewpoint_vog_sd" : "SDOG",
         "depth_norm_weighted_viewpoint_vog_var" : "Euclidean Depth-Weighted VOG",
         "depth_zs_weighted_viewpoint_vog_var" : "Coordinate Depth-Weighted VOG",
