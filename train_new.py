@@ -64,9 +64,10 @@ from metrics import readImages, read_image
 from render_uw import estimate_atmospheric_light, render_set
 from utils.sh_utils import SH2RGB
 from utils.filter_utils import create_paths, save_render
-from utils.plot_utils import plot_filter, plot_histogram
+from utils.plot_utils import plot_filter, plot_histogram, plot_ause, plot_auce
 from utils.ensemble_utils import * 
 from filtering.filter import get_filter_variable, get_depth_specific_filter_variable
+from filtering.ensemble_filter import get_ens_filter_variable
 from uq_metrics.auce import auce
 from uq_metrics.ause import ause
 
@@ -90,6 +91,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     scene = Scene(model_params, gaussians, shuffle=opt_params.shuffle)
     if opt_params.jitter_init:
         gaussians.sample_init_points()
+    if opt_params.randomize_init:
+        gaussians.randomize_init_points()
 
     # deep see color
     if opt_params.do_seathru:
@@ -187,6 +190,13 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
 
     done_binf_init_with_bg = False
     print_message_once = False
+
+    print("------------")
+    print(torch.cuda.memory_summary())
+    print("Training Allocated:", torch.cuda.memory_allocated() / 1024**3, "GB")
+    print("Training Reserved :", torch.cuda.memory_reserved() / 1024**3, "GB")
+    print("------------")
+
     while iteration < opt_params.iterations + 1:
         # # maybe this will help?
         # torch.cuda.empty_cache()
@@ -534,11 +544,20 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 )
 
             # Early Stopping Tracker
-            if val_total_loss < min_val_loss:
-                min_val_loss = val_total_loss
-                patience = opt_params.patience
+            if opt_params.do_seathru:
+                if iteration > opt_params.seathru_from_iter and not torch.isnan(val_total_loss): # Account for increased loss due to addtional losses
+                    if val_total_loss < min_val_loss:
+                        min_val_loss = val_total_loss
+                        patience = opt_params.patience
+                    else:
+                        patience -= 1
             else:
-                patience -= 1
+                if not torch.isnan(val_total_loss):
+                    if val_total_loss < min_val_loss:
+                        min_val_loss = val_total_loss
+                        patience = opt_params.patience
+                    else:
+                        patience -= 1
 
             # VOG Tracking
             if opt_params.do_filtering == True:
@@ -550,7 +569,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 timing_condition_1 = 0 < 20000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_20k
                 timing_condition_2 = 0 < 30000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_30k
                 grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
-                if ((timing_condition_1 or timing_condition_2) and grads_cam_condition) or patience == 0:
+                # if ((timing_condition_1 or timing_condition_2) and grads_cam_condition) or patience == 0:
+                if iteration == 1000:
                     print("It's Filtering Time!")
                     if iteration < 20000:
                         evaluated_20k = True
@@ -558,20 +578,18 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                         evaluated_30k = True
 
                     if opt_params.do_seathru and iteration > opt_params.seathru_from_iter:
-                        evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene, render, (pipe_params, background),
+                        evaluate_gaussian_filtering(opt_params, iteration, scene, render, (pipe_params, background),
                                 learned_bg, opt_params.learn_background,
                                 opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
                                 opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs,
                                 bs_model, at_model,
-                                opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
-                                depth_alpha_threshold=opt_params.depth_alpha_threshold
+                                opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation
                                 )
                     else:
-                        evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene, render, (pipe_params, background),
+                        evaluate_gaussian_filtering(opt_params, iteration, scene, render, (pipe_params, background),
                                 learned_bg, opt_params.learn_background,
                                 opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
-                                filter_depth=opt_params.filter_depth,
-                                depth_alpha_threshold=opt_params.depth_alpha_threshold
+                                filter_depth=opt_params.filter_depth
                                 )
                     
                 if iteration <= opt_params.densify_until_iter and iteration % opt_params.densification_interval == 0:
@@ -667,7 +685,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if not skip_eval_train:
         metrics_dirs = [train_image_dir]
         with torch.no_grad():
-            train_renders, train_image_names = render_set(
+            train_renders, train_image_names, train_radiis = render_set(
                 Path(model_params.model_path), "train", iteration, scene.getTrainCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -685,7 +703,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if model_params.val:
         val_image_dir = Path(model_params.model_path) / "val" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            val_renders, val_image_names = render_set(
+            val_renders, val_image_names, val_radiis = render_set(
                 Path(model_params.model_path), "val", iteration, scene.getValCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -702,7 +720,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if model_params.eval:
         test_image_dir = Path(model_params.model_path) / "test" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            test_renders, test_image_names = render_set(
+            test_renders, test_image_names, test_radiis = render_set(
                 Path(model_params.model_path), "test", iteration, scene.getTestCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -754,8 +772,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     with open(str(results_file), 'w') as f:
         json.dump(results, f)
 
-    return train_renders, train_image_names, val_renders, val_image_names, test_renders, test_image_names, scene
-
+    return val_renders, val_image_names, val_radiis, test_renders, test_image_names, test_radiis, scene, (background, learned_bg), (bs_model, at_model)
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -982,8 +999,20 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
                     if do_learn_bg:
                         alpha_bg_loss = alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(learned_bg.detach()), image_alpha)
                         if do_seathru and iteration > seathru_from_iter:
-                            alpha_bg_loss = alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(bs_model.B_inf.detach().clone()), image_alpha)
-
+                            if opt_params.alpha_binf_uw or opt_params.alpha_binf_render or opt_params.alpha_bg_opacities:
+                                if not opt_params.add_bg_binf:
+                                    alpha_bg_loss = torch.Tensor([0.0]).squeeze().cuda()
+                                if opt_params.alpha_binf_uw:
+                                    alpha_bg_loss += alpha_bg_criterion(underwater_image.squeeze().detach(), torch.sigmoid(bs_model.B_inf.detach()), image_alpha)
+                                if opt_params.alpha_bg_uw:
+                                    alpha_bg_loss += alpha_bg_criterion(underwater_image.squeeze().detach(), torch.sigmoid(bs_model.B_inf.detach()), image_alpha)
+                                if opt_params.alpha_binf_render:
+                                    alpha_bg_loss += alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(bs_model.B_inf.detach()), image_alpha)
+                            elif opt_params.bg_from_bs:
+                                if opt_params.turn_off_bg_loss:
+                                    alpha_bg_loss = torch.Tensor([0.0]).squeeze().cuda()
+                                else:
+                                    alpha_bg_loss = alpha_bg_criterion(underwater_image.squeeze().detach(), torch.sigmoid(learned_bg.detach()), image_alpha)
 
                     '''
                     losses
@@ -1143,6 +1172,8 @@ def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapse
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
+        print("Training Loss: ", loss.item(), " ---  Validation Loss: ", val_total_loss.item())
+
     return val_total_loss
 
 def apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=False, disable_attenuation=False, do_z_score=False):
@@ -1218,13 +1249,13 @@ def get_rendered_uncertainty(viewpoint, scene : Scene, renderArgs, uq_variable, 
     return render_uncertainty_image
 
 
-def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene, renderFunc, renderArgs,
+def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc, renderArgs,
                     learned_bg, do_learn_bg,
                     depth_norm_value=1.0, norm_depth_max=False, use_gt_depth=False,
                     do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
                     bs_model=None, at_model=None,
                     do_z_score=False, filter_depth=False, disable_attenuation=False,
-                    depth_alpha_threshold=0.0,
+                    ens_vars=None, ens_radii=None,
 ):
     torch.cuda.empty_cache()
     assert not torch.is_grad_enabled()
@@ -1234,9 +1265,11 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
 
     filter_path, hist_path, image_path, uq_path = create_paths(scene)
-    methods = opt_params.filter_criteria.split(",")
+    if ens_vars is not None and ens_radii is not None:
+        methods = ["ensemble"]
+    else:
+        methods = opt_params.filter_criteria.split(",")
     quantiles = torch.tensor([0.8, 0.9, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1])
-    # quantiles = torch.tensor([0.25, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1])
     all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
 
     for method in methods:
@@ -1245,22 +1278,24 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
             filter_variable, filter_variable_const, filter_thresholds = get_filter_variable(method, quantiles, scene, iteration)
 
         for config in validation_configs:
-            l1_losses, l_ssims, psnrs = [], [], []
-            # lpipses = []
+            l1_losses, l_ssims, psnrs = [], [], [] # lpipses = []
             ause_metric, auce_metric = 0.0, 0.0
+            all_auce_coverages = np.zeros(99)
+            all_ause_diff, all_ause_err, all_ause_err_by_var = np.zeros(100), np.zeros(100), np.zeros(100)
             for t_idx, threshold in enumerate(filter_thresholds):
-                l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
-                # lpips_metric = 0.0
+                l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0 # lpips_metric = 0.0
                 if config['cameras'] and len(config['cameras']) > 0:
+                    val_or_test = ("test" in config['name'].split("_")[1] or "val" in config['name'].split("_")[1])
+                    if "ensemble" in method and val_or_test:
+                        filter_variable, threshold = get_ens_filter_variable(scene, config['cameras'], ens_vars, ens_radii, quantiles, t_idx)
                     for idx, viewpoint in enumerate(config['cameras']):
-                        val_or_test = ("test" in config['name'].split("_")[1] or "val" in config['name'].split("_")[1])
                         if "depth" in method:
                             filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, t_idx)
 
                         # Render image and depth
                         remove_high = method != "depth_zs" and method != "depth_norm" and "inverse" not in method
 
-                        if t_idx == len(quantiles) - 1: # Render without filtering
+                        if t_idx == len(quantiles) - 1: # Render without filtering as baseline
                             render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                             render_depth_pkg = render_depth(viewpoint, scene.gaussians, *renderArgs)
                         else:
@@ -1309,10 +1344,18 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                             psnr_metric += psnr(image, gt_image).mean().double()
                             # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
-                        if "vog" in method and val_or_test and (t_idx == len(quantiles) - 1): # Evaluate UQ
+                        if ("vog" in method or "random" in method) and val_or_test and (t_idx == len(quantiles) - 1): # Evaluate UQ
                             flat_rgb_uncertainty = render_uncertainty_image.repeat(3,1,1).flatten()
-                            ause_metric += ause(flat_rgb_uncertainty, ((underwater_image.squeeze() - gt_image) ** 2).flatten(), err_type="mse")[3]
-                            auce_metric += auce(np.array(underwater_image.squeeze().flatten().cpu()), np.array(flat_rgb_uncertainty.cpu()), np.array(gt_image.flatten().cpu()))["auc_abs_error_values"]
+                            normalized_flat_rgb_uncertainty = torch.clamp(flat_rgb_uncertainty / torch.max(flat_rgb_uncertainty), 0.0, 1.0)
+
+                            ratio_removed, ause_err, ause_err_by_var, ause_metric_val = ause(normalized_flat_rgb_uncertainty, ((underwater_image.squeeze() - gt_image) ** 2).flatten(), err_type="mse")
+                            ause_metric += ause_metric_val
+                            all_ause_diff += (ause_err_by_var - ause_err)
+                            all_ause_err += ause_err
+                            all_ause_err_by_var += ause_err_by_var
+                            auce_dict = auce(np.array(underwater_image.squeeze().flatten().cpu()), np.array(normalized_flat_rgb_uncertainty.cpu()), np.array(gt_image.flatten().cpu()))
+                            auce_metric += auce_dict["auc_abs_error_values"]
+                            all_auce_coverages += auce_dict["coverage_values"]
 
                     # Plot debugging histogram
                     if "vog" in method and (t_idx == len(quantiles) - 1) and val_or_test:
@@ -1329,6 +1372,7 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
                     psnrs.append(psnr_metric.cpu().item())
                     # lpipses.append(lpips_metric.cpu().item())
 
+            tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
             plot_histogram(filter_variable.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Variable", folder_path=hist_path, iteration=iteration) # Only plot once per image (not every threshold since does not change)
 
             all_l1_losses.append(l1_losses)
@@ -1340,15 +1384,25 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
             print("SSIMs: ", l_ssims)
             print("Thresholds: ", filter_thresholds)
 
-            if "vog" in method and val_or_test:
+            if ("vog" in method or "random" in method) and val_or_test:
                 print("Split: ", config['name'])
                 ause_metric /= len(config['cameras'])
                 auce_metric /= len(config['cameras'])
-                print("Ensemble AUSE: ", ause_metric)
-                print("Ensemble AUCE: ", auce_metric)
+                print("Method: ", method)
+                print("AUSE: ", ause_metric)
+                print("AUCE: ", auce_metric)
+
+                all_auce_coverages /= len(config['cameras'])
+                all_ause_diff /= len(config['cameras'])
+                all_ause_err /= len(config['cameras'])
+                all_ause_err_by_var /= len(config['cameras'])
+
+                plot_auce(all_auce_coverages, save_dir=scene.model_path, output=method)
+                plot_ause(all_ause_diff, all_ause_err_by_var, all_ause_err, save_dir=scene.model_path, output=method)
 
                 metrics = {"AUSE": ause_metric, "AUCE": auce_metric}
-                file_name = "ensemble_metrics" + str(method) + "_" + config['name'].split("_")[1] + ".json"
+                timestamp = datetime.now().strftime("%H%M%S")
+                file_name = "uq_metrics_" + str(method) + "_" + config['name'].split("_")[1] + "_" + timestamp + ".json"
                 metrics_file = Path(scene.model_path) / file_name
                 with open(str(metrics_file), 'w') as f:
                     json.dump(metrics, f)
@@ -1358,59 +1412,59 @@ def evaluate_gaussian_filtering(tb_writer, opt_params, iteration, scene : Scene,
 
 def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, model_path, num_models = 5):
     ens_path = create_ens_path(model_path)
-    all_train_renders, all_test_renders = [], []
-    all_train_image_names, all_test_image_names = [], []
+    all_val_renders, all_test_renders = [], []
+    all_val_image_names, all_test_image_names = [], []
+    all_val_radii, all_test_radii = [], []
     for m_idx in range(num_models):
         torch.cuda.empty_cache()
-        train_renders, train_image_names, val_renders, val_image_names, test_renders, test_image_names, scene = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
-        all_train_renders.append(train_renders)
-        all_test_renders.append(test_renders)
-        all_train_image_names.append(train_image_names)
-        all_test_image_names.append(test_image_names)
+        val_renders, val_image_names, val_radiis, test_renders, test_image_names, test_radiis, scene, bgs, water_models = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
+        # all_test_renders.append(test_renders)
+        # all_test_image_names.append(test_image_names)
+        # all_test_radii.append(all_test_radii)
 
-    mean, var, ordered_names = get_ensemble_variance(all_test_renders, all_test_image_names)
+        val_renders = [v.detach().cpu() for v in val_renders]
+        
+        all_val_renders.append(val_renders)
+        all_val_image_names.append(val_image_names)
+        # all_val_radii.append(val_radiis)
+
+        # ---- DELETE GPU OBJECTS ----
+        if m_idx != num_models - 1:
+            del scene
+            del bgs
+            del val_radiis
+            del water_models
+        del test_renders
+        del test_image_names
+        del test_radiis
+        del val_renders
+
+        torch.cuda.empty_cache()   
+
+    mean, var, ordered_names = get_ensemble_variance(all_val_renders, all_val_image_names)
     save_ens_uncertainty(var, ordered_names, ens_path)
     save_ens_mean_pred(mean, ordered_names, ens_path)
 
-
     ### Get Ensemble Performance Metrics
-    viewpoints = scene.getTestCameras()
-    l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
-    ause_metric, auce_metric = 0.0, 0.0
-    for view in viewpoints:
-        view_name = view.image_name
-        gt_image = torch.clamp(view.original_image.cpu(), 0.0, 1.0)
+    viewpoints = scene.getValCameras()
+    calc_ens_metrics(viewpoints, ordered_names, mean, var, model_params.model_path)
 
-        render_idx = ordered_names.index(view_name)
-        mean_render = mean[render_idx]
-        var_render = var[render_idx]
-
-        l1 += l1_loss(mean_render, gt_image).mean().double()
-        l_ssim += ssim(mean_render, gt_image).mean().double()
-        psnr_metric += psnr(mean_render, gt_image).mean().double()
-
-        ### Get Ensemble UQ Metrics
-        ratio_removed, ause_err, ause_err_by_var, ause_value = ause(var_render.flatten(), ((mean_render - gt_image) ** 2).flatten(), err_type="mse")
-        auce_dict = auce(np.array(mean_render.flatten()), np.array(var_render.flatten()), np.array(gt_image.flatten()))
-        ause_metric += ause_value
-        auce_metric += auce_dict["auc_abs_error_values"]
-
-    l1 /= len(viewpoints)
-    l_ssim /= len(viewpoints)
-    psnr_metric /= len(viewpoints)
-    ause_metric /= len(viewpoints)
-    auce_metric /= len(viewpoints)
-
-    print("Ensemble L1: ", l1.item())
-    print("Ensemble SSIM: ", l_ssim.item())
-    print("Ensemble PSNR: ", psnr_metric.item())
-    print("Ensemble AUSE: ", ause_metric)
-    print("Ensemble AUCE: ", auce_metric)
-
-    metrics = {"SSIM": l_ssim.item(), "PSNR": psnr_metric.item(), "AUSE": ause_metric, "AUCE": auce_metric}
-    metrics_file = Path(model_params.model_path) / "ensemble_metrics.json"
-    with open(str(metrics_file), 'w') as f:
-        json.dump(metrics, f)
+    ### Filter High Variance Gaussians ###
+    if opt_params.filter_ens:
+        with torch.no_grad():
+            if water_models[0] is not None and water_models[1] is not None:
+                evaluate_gaussian_filtering(opt_params, 30000, scene, render, (pipe_params, bgs[0]),
+                        bgs[1], opt_params.learn_background, opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                        opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs, water_models[0], water_models[1],
+                        opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
+                        ens_vars=var, ens_radii=val_radiis
+                        )
+            else:
+                evaluate_gaussian_filtering(opt_params, 30000, scene, render, (pipe_params, bgs[0]),
+                        bgs[1], opt_params.learn_background, opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
+                        filter_depth=opt_params.filter_depth, ens_vars=var, ens_radii=val_radiis
+                        )
+    
 
     
                         
@@ -1441,6 +1495,12 @@ if __name__ == "__main__":
     args.checkpoint_iterations.append(args.iterations)
 
     for _ in range(args.reps):
+        print("------------")
+        print(torch.cuda.memory_summary())
+        print("Start Allocated:", torch.cuda.memory_allocated() / 1024**3, "GB")
+        print("Start Reserved :", torch.cuda.memory_reserved() / 1024**3, "GB")
+        print("------------")
+
         now = datetime.now()
         today = now.strftime("%m%d%Y")
         args.model_path = str(Path(args.source_path) / "experiments" / today / args.exp)

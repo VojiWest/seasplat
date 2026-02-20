@@ -167,10 +167,6 @@ def render_uncertainty(uncertainty, viewpoint_camera, pc : GaussianModel, pipe, 
 
     repeated_uncertainties = uncertainty.unsqueeze(-1).repeat(1,3)
 
-    # print("Repeated UQs Shape: ", repeated_uncertainties.shape)
-    # print("First UQ: ", uncertainty[0].item())
-
-
     return render(
         viewpoint_camera=viewpoint_camera,
         pc=pc,

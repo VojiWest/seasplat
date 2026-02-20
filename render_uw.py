@@ -127,12 +127,14 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
     timings_seathru = []
 
     renders = torch.empty(0)
+    radiis = []
     img_names = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         start_time = time.time()
         render_pkg = render(view, gaussians, pipeline, render_background)
         rendered_image, image_alpha = render_pkg["render"], render_pkg["alpha"]
+        radii = render_pkg["radii"]
         render_depth_pkg = render_depth(view, gaussians, pipeline, render_background)
         depth_image = render_depth_pkg["render"][0].unsqueeze(0)
         depth_image = depth_image / image_alpha
@@ -193,6 +195,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
             print("UW Image Shape: ", underwater_image_batch.squeeze().shape)
             renders[idx] = underwater_image_batch.squeeze()
             img_names.append(view.image_name)
+            radiis.append(radii)
 
         if save_as_jpeg:
             torchvision.utils.save_image(rendered_image, render_dir / f"{view.image_name}.JPG")
@@ -207,7 +210,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, render_b
         print(f"[Seathru] Average time for {len(views)} images: {np.mean(timings_seathru)}")
     print(f"[3DGS] Average time for {len(views)} images: {np.mean(timings_3dgs)}")
 
-    return renders, img_names
+    return renders, img_names, radiis
 
 def render_sets(
         model_params : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool,
