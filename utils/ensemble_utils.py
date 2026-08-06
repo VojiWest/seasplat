@@ -7,6 +7,7 @@ from pathlib import Path
 
 from utils.loss_utils import l1_loss, ssim
 from utils.image_utils import psnr
+from lpipsPyTorch import lpips
 from uq_metrics.auce import auce
 from uq_metrics.ause import ause
 from utils.plot_utils import plot_ause, plot_auce
@@ -44,8 +45,8 @@ def create_ens_path(model_path):
     return ens_path
 
 def save_ens_uncertainty(variance, ordered_names, save_path):
-    variance_norm = torch.clamp(variance / torch.max(variance), 0.0, 1.0)
-    for var_image, img_name in zip(variance_norm, ordered_names):
+    # variance_norm = torch.clamp(variance / torch.max(variance), 0.0, 1.0)
+    for var_image, img_name in zip(variance, ordered_names):
         var_gray = var_image.mean(dim=0, keepdim=True)
         image_name = f"EnsUQ_{img_name}.png"
         save_image(var_gray, f"{save_path}/{image_name}")
@@ -58,7 +59,7 @@ def save_ens_mean_pred(pred_mean, ordered_names, save_path):
         save_image(pred_norm, f"{save_path}/{image_name}")
 
 def calc_ens_metrics(viewpoints, ordered_names, mean, var, model_path):
-    l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
+    l1, l_ssim, psnr_metric, lpips_metric = 0.0, 0.0, 0.0, 0.0
     ause_metric, auce_metric = 0.0, 0.0
     all_auce_coverages = np.zeros(99)
     all_ause_diff, all_ause_err, all_ause_err_by_var = np.zeros(100), np.zeros(100), np.zeros(100)
@@ -76,6 +77,7 @@ def calc_ens_metrics(viewpoints, ordered_names, mean, var, model_path):
         l1 += l1_loss(mean_render, gt_image).mean().double()
         l_ssim += ssim(mean_render, gt_image).mean().double()
         psnr_metric += psnr(mean_render, gt_image).mean().double()
+        lpips_metric += lpips(mean_render, gt_image, net_type='vgg')
 
         ### Get Ensemble UQ Metrics
         ratio_removed, ause_err, ause_err_by_var, ause_value = ause(var_render.flatten(), ((mean_render - gt_image) ** 2).flatten(), err_type="mse")
@@ -91,12 +93,14 @@ def calc_ens_metrics(viewpoints, ordered_names, mean, var, model_path):
     l1 /= len(viewpoints)
     l_ssim /= len(viewpoints)
     psnr_metric /= len(viewpoints)
+    lpips_metric /= len(viewpoints)
     ause_metric /= len(viewpoints)
     auce_metric /= len(viewpoints)
 
     print("Ensemble L1: ", l1.item())
     print("Ensemble SSIM: ", l_ssim.item())
     print("Ensemble PSNR: ", psnr_metric.item())
+    print("Ensemble LPIPS: ", lpips_metric.item())
     print("Ensemble AUSE: ", ause_metric)
     print("Ensemble AUCE: ", auce_metric)
 
@@ -108,7 +112,7 @@ def calc_ens_metrics(viewpoints, ordered_names, mean, var, model_path):
     plot_auce(all_auce_coverages, save_dir=model_path, output="Ens")
     plot_ause(all_ause_diff, all_ause_err_by_var, all_ause_err, save_dir=model_path, output="Ens")
 
-    metrics = {"SSIM": l_ssim.item(), "PSNR": psnr_metric.item(), "AUSE": ause_metric, "AUCE": auce_metric}
+    metrics = {"SSIM": l_ssim.item(), "PSNR": psnr_metric.item(), "LPIPS": lpips_metric.item(), "AUSE": ause_metric, "AUCE": auce_metric}
     metrics_file = Path(model_path) / "ensemble_metrics.json"
     with open(str(metrics_file), 'w') as f:
         json.dump(metrics, f)

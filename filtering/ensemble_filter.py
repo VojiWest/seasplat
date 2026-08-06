@@ -45,7 +45,7 @@ def find_reset_gaussians_ratio(gaussians, view, radii, variance, ratio=0.1):
     return reset_mask
 
 # This function is modified from an original verison from "https://github.com/sailor-z/SE-GS/blob/main/train_llff.py#L292"
-def get_gaussian_weighted_uncertainty(gaussians, view, radii, variance):
+def get_gaussian_weighted_uncertainty(gaussians, view, variance):
     pts3d = gaussians.get_xyz
 
     K = torch.from_numpy(get_intrinsic(view)).cuda().float()
@@ -87,12 +87,12 @@ def get_high_variance_gaussians(gaussians, viewpoints, radiis, variances, filter
 
     return guassian_uncertainty
 
-def get_mean_variance_gaussians(gaussians, viewpoints, radiis, variances):
+def get_mean_variance_gaussians(gaussians, viewpoints, variances):
     sum_gaussians_uncertainty = torch.zeros(len(gaussians.get_xyz))
     uq_counter = torch.zeros(len(gaussians.get_xyz))
 
     for idx in range(len(viewpoints)):
-        gaussian_uncertainties = get_gaussian_weighted_uncertainty(gaussians, viewpoints[idx], radiis[idx], variances[idx])
+        gaussian_uncertainties = get_gaussian_weighted_uncertainty(gaussians, viewpoints[idx], variances[idx])
         sum_gaussians_uncertainty += gaussian_uncertainties
         uq_counter += gaussian_uncertainties > 0
 
@@ -100,8 +100,8 @@ def get_mean_variance_gaussians(gaussians, viewpoints, radiis, variances):
 
     return mean_gaussian_uncertainties
 
-def get_ens_filter_variable(scene, viewpoints, variances, radiis, quantiles, t_idx):
-    guassian_uncertainty = get_mean_variance_gaussians(scene.gaussians, viewpoints, radiis, variances)
+def get_ens_filter_variable(scene, viewpoints, variances, quantiles, t_idx):
+    guassian_uncertainty = get_mean_variance_gaussians(scene.gaussians, viewpoints, variances)
 
     threshold = torch.quantile(guassian_uncertainty, quantiles[t_idx])
     print("Theshold at quantile", quantiles[t_idx], " = ", threshold)

@@ -27,6 +27,11 @@ import uuid
 from tqdm import tqdm
 import numpy as np
 
+import gc
+from collections import defaultdict
+import psutil
+import shutil
+
 from utils.general_utils import inverse_sigmoid
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
@@ -551,6 +556,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                         patience = opt_params.patience
                     else:
                         patience -= 1
+                    print("Patience is ", patience)
             else:
                 if not torch.isnan(val_total_loss):
                     if val_total_loss < min_val_loss:
@@ -569,8 +575,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 timing_condition_1 = 0 < 20000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_20k
                 timing_condition_2 = 0 < 30000 - iteration <= 5 * len(scene.getTrainCameras()) and not evaluated_30k
                 grads_cam_condition = torch.count_nonzero(gaussians.get_cam_idxs_grads_stored()) == (len(scene.getTrainCameras()))
-                # if ((timing_condition_1 or timing_condition_2) and grads_cam_condition) or patience == 0:
-                if iteration == 1000:
+                if ((timing_condition_1 or timing_condition_2) and grads_cam_condition) or patience == 0:
+                    # if iteration == 1000:
                     print("It's Filtering Time!")
                     if iteration < 20000:
                         evaluated_20k = True
@@ -651,6 +657,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             # Early Stopping
             if patience == 0:
                 print("Early Stopping at Iteration:", iteration, ", Validation Loss did not improve for", opt_params.patience, "iterations")
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
                 break
 
         iteration += 1
@@ -682,8 +690,11 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     if opt_params.bg_from_bs:
         learned_bg = None
 
+    metrics_dirs = []
+
     if not skip_eval_train:
-        metrics_dirs = [train_image_dir]
+        # metrics_dirs = [train_image_dir]
+        metrics_dirs.append(("Train", train_image_dir))
         with torch.no_grad():
             train_renders, train_image_names, train_radiis = render_set(
                 Path(model_params.model_path), "train", iteration, scene.getTrainCameras(), gaussians, pipe_params, background,
@@ -697,13 +708,13 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
             )
     else:
         train_renders = []
-        metrics_dirs = []
+        # metrics_dirs = []
         train_image_names = []
 
     if model_params.val:
         val_image_dir = Path(model_params.model_path) / "val" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            val_renders, val_image_names, val_radiis = render_set(
+            val_renders, val_image_names, _ = render_set(
                 Path(model_params.model_path), "val", iteration, scene.getValCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -713,14 +724,15 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 at_model,
                 save_as_jpeg=use_jpeg,
             )
-        metrics_dirs.append(val_image_dir)
+        # metrics_dirs.append(val_image_dir)
+        metrics_dirs.append(("Val", val_image_dir))
     else:
         val_renders, val_image_names = [], []
 
     if model_params.eval:
         test_image_dir = Path(model_params.model_path) / "test" / f"{'with_water' if opt_params.do_seathru else 'render'}"
         with torch.no_grad():
-            test_renders, test_image_names, test_radiis = render_set(
+            test_renders, test_image_names, _ = render_set(
                 Path(model_params.model_path), "test", iteration, scene.getTestCameras(), gaussians, pipe_params, background,
                 opt_params.do_seathru,
                 False,
@@ -730,7 +742,8 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 at_model,
                 save_as_jpeg=use_jpeg,
             )
-        metrics_dirs.append(test_image_dir)
+        # metrics_dirs.append(test_image_dir)
+        metrics_dirs.append(("Test", test_image_dir))
 
     '''
     eval images
@@ -738,7 +751,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     print("Running metrics")
     results = {}
     chunk_size = 128
-    for eval_idx, image_dir in enumerate(metrics_dirs):
+    for name, image_dir in metrics_dirs:
+        print(f"-----------{name}")
+        print("Evaluating:", image_dir)
         ssims = []
         psnrs = []
         lpipss = []
@@ -755,14 +770,15 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
                 psnrs.append(psnr(renders[idx], gts[idx]))
                 lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
 
-        print(f"-----------{'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'}")
+        # print(f"-----------{'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'}")
+        print(f"-----------{name}")
         print("  SSIM ^: {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
         print("  PSNR ^: {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
         print("  LPIPS v: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
         print("")
 
-        key = 'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'
-        results[key] = {
+        # key = 'Train' if eval_idx == 0 else 'Val' if eval_idx == 1 else 'Test'
+        results[name] = {
             "SSIM": torch.tensor(ssims).mean().item(),
             "PSNR": torch.tensor(psnrs).mean().item(),
             "LPIPS": torch.tensor(lpipss).mean().item(),
@@ -772,7 +788,7 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
     with open(str(results_file), 'w') as f:
         json.dump(results, f)
 
-    return val_renders, val_image_names, val_radiis, test_renders, test_image_names, test_radiis, scene, (background, learned_bg), (bs_model, at_model)
+    return val_renders, val_image_names, test_renders, test_image_names, scene, (background, learned_bg), (bs_model, at_model)
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -790,10 +806,11 @@ def prepare_output_and_logger(args):
 
     # Create Tensorboard writer
     tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
+    # if TENSORBOARD_FOUND:
+    #     tb_writer = SummaryWriter(args.model_path)
+    # else:
+    #     print("Tensorboard not available: not logging progress")
+    print("TensorBoard disabled")
     return tb_writer
 
 def training_report(tb_writer, opt_params, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs,
@@ -1255,17 +1272,17 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
                     do_seathru=False, seathru_from_iter=9999999999, bg_from_bs=False,
                     bs_model=None, at_model=None,
                     do_z_score=False, filter_depth=False, disable_attenuation=False,
-                    ens_vars=None, ens_radii=None,
+                    ens_vars_test=None, ens_vars_val=None,
 ):
     torch.cuda.empty_cache()
     assert not torch.is_grad_enabled()
-    # validation_configs = ({'name': 'eval_test', 'cameras' : scene.getTestCameras()},
-    #                         {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
     validation_configs = ({'name': 'eval_val', 'cameras' : scene.getValCameras()},
-                            {'name': 'eval_train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 51, 5)]})
+                            {'name': 'eval_test', 'cameras' : scene.getTestCameras()})
+
+    print("Post Processing Filtering Gaussians")
 
     filter_path, hist_path, image_path, uq_path = create_paths(scene)
-    if ens_vars is not None and ens_radii is not None:
+    if ens_vars_test is not None and ens_vars_val is not None:
         methods = ["ensemble"]
     else:
         methods = opt_params.filter_criteria.split(",")
@@ -1273,24 +1290,47 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
     all_l1_losses, all_l_ssims, all_psnrs, all_lpipses = [], [], [], []
 
     for method in methods:
-        print("Filtering Based on: ", method)
+        # Get filtering variables and thresholds based on method
+        print("\nFiltering Based on: ", method)
         if method != "depth_zs" and method != "depth_norm":  # Get filtering variables and thresholds based on method
             filter_variable, filter_variable_const, filter_thresholds = get_filter_variable(method, quantiles, scene, iteration)
+        else:
+            filter_thresholds = quantiles
+        best_quantile = None
 
         for config in validation_configs:
-            l1_losses, l_ssims, psnrs = [], [], [] # lpipses = []
+            l1_losses, l_ssims, psnrs = [], [], []
+            lpipses = []
             ause_metric, auce_metric = 0.0, 0.0
             all_auce_coverages = np.zeros(99)
             all_ause_diff, all_ause_err, all_ause_err_by_var = np.zeros(100), np.zeros(100), np.zeros(100)
+
+            if config['name'] == "eval_test":
+                filter_thresholds = [best_quantile]
+                print("Best Quantile Set To: ", best_quantile)
+
             for t_idx, threshold in enumerate(filter_thresholds):
-                l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0 # lpips_metric = 0.0
+                l1, l_ssim, psnr_metric = 0.0, 0.0, 0.0
+                lpips_metric = 0.0
+                if ("depth" in method or "ensemble" in method) and config['name'] == "eval_test":
+                    thresh_idx = int(threshold)
+
                 if config['cameras'] and len(config['cameras']) > 0:
                     val_or_test = ("test" in config['name'].split("_")[1] or "val" in config['name'].split("_")[1])
+                    
                     if "ensemble" in method and val_or_test:
-                        filter_variable, threshold = get_ens_filter_variable(scene, config['cameras'], ens_vars, ens_radii, quantiles, t_idx)
+                        # filter_variable, threshold = get_ens_filter_variable(scene, config['cameras'], ens_vars, ens_radii, quantiles, t_idx)
+                        if config['name'] != "eval_test":
+                            thresh_idx = t_idx
+                            filter_variable, threshold = get_ens_filter_variable(scene, config['cameras'], ens_vars_val, quantiles, thresh_idx)
+                        else:
+                            filter_variable, threshold = get_ens_filter_variable(scene, config['cameras'], ens_vars_test, quantiles, thresh_idx)
+
                     for idx, viewpoint in enumerate(config['cameras']):
                         if "depth" in method:
-                            filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, t_idx)
+                            if config['name'] != "eval_test":
+                                thresh_idx = t_idx
+                            filter_variable, threshold = get_depth_specific_filter_variable(method, filter_variable_const, quantiles, scene, viewpoint, thresh_idx)
 
                         # Render image and depth
                         remove_high = method != "depth_zs" and method != "depth_norm" and "inverse" not in method
@@ -1319,15 +1359,11 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
                         else:
                             image = rendered_image
 
-                        normalized_depth_image = torch.clamp(depth_image / torch.max(depth_image), 0.0, 1.0)
-                        clamped_raw_render_image = torch.clamp(rendered_image, 0.0, 1.0)
-                        clamped_rgb_image = torch.clamp(image, 0.0, 1.0)
-
                         # implement the forward process here
                         if bs_model is not None and at_model is not None:
                             underwater_image = apply_at_and_bs(viewpoint, image, depth_image, at_model, bs_model, use_gt_depth=use_gt_depth, disable_attenuation=disable_attenuation, do_z_score=do_z_score)
 
-                        if val_or_test and (idx == 0 or idx == 6 or idx == 13):
+                        if config['name'] == "eval_test":
                             save_render(underwater_image, image_path, viewpoint, method, iteration, t_idx)
 
                         # get the groundtruth rgb image
@@ -1337,14 +1373,16 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
                             l1 += l1_loss(underwater_image.squeeze(), gt_image).mean().double()
                             l_ssim += ssim(underwater_image.squeeze(), gt_image).mean().double()
                             psnr_metric += psnr(underwater_image.squeeze(), gt_image).mean().double()
-                            # lpips_metric += lpips(underwater_image.squeeze(), gt_image, net_type='vgg').mean().double()
+                            if config['name'] == "eval_test":
+                                lpips_metric += lpips(underwater_image.squeeze(), gt_image, net_type='vgg').mean().double()
                         else:
                             l1 += l1_loss(image, gt_image).mean().double()
                             l_ssim += ssim(image, gt_image).mean().double()
                             psnr_metric += psnr(image, gt_image).mean().double()
-                            # lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
+                            if config['name'] == "eval_test":
+                                lpips_metric += lpips(image, gt_image, net_type='vgg').mean().double()
 
-                        if ("vog" in method or "random" in method) and val_or_test and (t_idx == len(quantiles) - 1): # Evaluate UQ
+                        if ("vog" in method or "random" in method) and config['name'] == "eval_test": # Evaluate UQ
                             flat_rgb_uncertainty = render_uncertainty_image.repeat(3,1,1).flatten()
                             normalized_flat_rgb_uncertainty = torch.clamp(flat_rgb_uncertainty / torch.max(flat_rgb_uncertainty), 0.0, 1.0)
 
@@ -1365,12 +1403,33 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
                     l1 /= len(config['cameras'])
                     l_ssim /= len(config['cameras'])
                     psnr_metric /= len(config['cameras'])
-                    # lpips_metric /= len(config['cameras'])
+                    if config['name'] == "eval_test":
+                        lpips_metric /= len(config['cameras'])
 
                     l1_losses.append(l1.cpu().item())
                     l_ssims.append(l_ssim.cpu().item())
                     psnrs.append(psnr_metric.cpu().item())
-                    # lpipses.append(lpips_metric.cpu().item())
+                    if config['name'] == "eval_test":
+                        lpipses.append(lpips_metric.cpu().item())
+
+            if config['name'] == "eval_val":
+                highest_psnr = max(psnrs)
+                if method != "depth_zs" and method != "depth_norm" and method != "ensemble":
+                    best_quantile = filter_thresholds[psnrs.index(highest_psnr)]
+                else:
+                    best_quantile = psnrs.index(highest_psnr)
+                # if method != "depth_zs" and method != "depth_norm":
+                print("Best Quantile Set To Idx: ", psnrs.index(highest_psnr), " = quantile: ", quantiles[psnrs.index(highest_psnr)])
+
+            if config['name'] == "eval_test":
+                print("-------------------------------------------")
+                print("-------------------------------------------")
+                print("Test Metircs for Method ", method, "at Best Threshold of :", best_quantile)
+                print("PSNR of test images: ", psnrs)
+                print("SSIM of test images: ", l_ssims)
+                print("LPIPS of test images: ", lpipses)
+                print("-------------------------------------------")
+                print("-------------------------------------------")
 
             tag_header = config['name'] + "_view_{}".format(viewpoint.image_name)
             plot_histogram(filter_variable.flatten().tolist(), title=tag_header + "_" + method + "_Uncertainty_Variable", folder_path=hist_path, iteration=iteration) # Only plot once per image (not every threshold since does not change)
@@ -1378,13 +1437,13 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
             all_l1_losses.append(l1_losses)
             all_l_ssims.append(l_ssims)
             all_psnrs.append(psnrs)
-            # all_lpipses.append(lpipses)
+            all_lpipses.append(lpipses)
 
             print("PSNRs: ", psnrs)
             print("SSIMs: ", l_ssims)
             print("Thresholds: ", filter_thresholds)
 
-            if ("vog" in method or "random" in method) and val_or_test:
+            if ("vog" in method or "random" in method) and config['name'] == "eval_test":
                 print("Split: ", config['name'])
                 ause_metric /= len(config['cameras'])
                 auce_metric /= len(config['cameras'])
@@ -1407,46 +1466,141 @@ def evaluate_gaussian_filtering(opt_params, iteration, scene : Scene, renderFunc
                 with open(str(metrics_file), 'w') as f:
                     json.dump(metrics, f)
     
-    plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
+    # plot_filter(filter_thresholds, quantiles.cpu().numpy(), all_l1_losses, all_l_ssims, all_lpipses, all_psnrs, filter_path, iteration, methods, validation_configs)
 
 
 def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, model_path, num_models = 5):
     ens_path = create_ens_path(model_path)
     all_val_renders, all_test_renders = [], []
-    all_val_image_names, all_test_image_names = [], []
-    all_val_radii, all_test_radii = [], []
+    # all_val_image_names, all_test_image_names = [], []
+
+    tmp_dir = os.path.join(ens_path, "tmp_preds")
+    os.makedirs(tmp_dir, exist_ok=True)
+
     for m_idx in range(num_models):
         torch.cuda.empty_cache()
-        val_renders, val_image_names, val_radiis, test_renders, test_image_names, test_radiis, scene, bgs, water_models = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
-        # all_test_renders.append(test_renders)
-        # all_test_image_names.append(test_image_names)
-        # all_test_radii.append(all_test_radii)
+        val_renders, val_image_names, test_renders, test_image_names, scene, bgs, water_models = training(model_params, opt_params, pipe_params, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from)
+        print(
+            "Model", m_idx, "RAM:",
+            psutil.Process().memory_info().rss / 1024**3,
+            "GB"
+        )
 
-        val_renders = [v.detach().cpu() for v in val_renders]
-        
-        all_val_renders.append(val_renders)
-        all_val_image_names.append(val_image_names)
-        # all_val_radii.append(val_radiis)
-
-        # ---- DELETE GPU OBJECTS ----
         if m_idx != num_models - 1:
             del scene
             del bgs
-            del val_radiis
             del water_models
+
+        model_dir_test = os.path.join(tmp_dir, f"model_{m_idx}_test")
+        os.makedirs(model_dir_test, exist_ok=True)
+        model_dir_val = os.path.join(tmp_dir, f"model_{m_idx}_val")
+        os.makedirs(model_dir_val, exist_ok=True)
+
+        print("Test Save Dir: ", model_dir_test)
+        print("Val Save Dir: ", model_dir_val)
+
+        for img_name, test_render in zip(test_image_names, test_renders):
+            print(
+                "TEST -- Model", m_idx, "Image Name:", img_name, "RAM:",
+                psutil.Process().memory_info().rss / 1024**3,
+                "GB"
+            )
+
+            save_path = os.path.join(model_dir_test, f"{img_name}.pt")
+
+            usage = shutil.disk_usage(os.path.dirname(save_path))
+            print("Free GB:", usage.free / 1024**3)
+
+            cpu_test_tensor = test_render.detach().cpu()
+
+            print("Shape:", cpu_test_tensor.shape)
+            print("Dtype:", cpu_test_tensor.dtype)
+
+            print("shape:", cpu_test_tensor.shape)
+            print("stride:", cpu_test_tensor.stride())
+            print("storage MB:", cpu_test_tensor.untyped_storage().nbytes() / 1024**2)
+
+            cpu_test_tensor = test_render.detach().float().contiguous().cpu().clone()
+
+            size_gb = (cpu_test_tensor.numel() * cpu_test_tensor.element_size() / 1024**3)
+            print("Tensor size:", size_gb, "GB")
+
+            torch.save(cpu_test_tensor, save_path)
+
+            print(
+                "Actual file size:",
+                os.path.getsize(save_path)/1024**2,
+                "MB"
+            )
+
+            del cpu_test_tensor
+
+
+        for img_name, val_render in zip(val_image_names, val_renders):
+            print(
+                "VAL -- Model", m_idx, "Image Name:", img_name, "RAM:",
+                psutil.Process().memory_info().rss / 1024**3,
+                "GB"
+            )
+
+            before = sum(
+                os.path.getsize(os.path.join(model_dir_test, f))
+                for f in os.listdir(model_dir_test)
+            )
+
+            save_path = os.path.join(model_dir_val, f"{img_name}.pt")
+
+            usage = shutil.disk_usage(os.path.dirname(save_path))
+            print("Free GB:", usage.free / 1024**3)
+
+            # cpu_val_tensor = val_render.detach().cpu()
+            cpu_val_tensor = val_render.detach().float().contiguous().cpu().clone()
+            try:
+                torch.save(cpu_val_tensor, save_path)
+            except Exception as e:
+                print("FAILED SAVE:", save_path)
+
+                raise
+
+            after = sum(
+                os.path.getsize(os.path.join(model_dir_test, f))
+                for f in os.listdir(model_dir_test)
+            )
+
+            print("Directory grew by MB:", (after-before)/1024**2)
+
+            # torch.save(cpu_val_tensor, save_path)
+            del cpu_val_tensor
+            gc.collect()
+
+            
+
+        # ---- DELETE GPU OBJECTS ----
         del test_renders
-        del test_image_names
-        del test_radiis
         del val_renders
+        del val_image_names
+        del test_image_names
 
         torch.cuda.empty_cache()   
 
-    mean, var, ordered_names = get_ensemble_variance(all_val_renders, all_val_image_names)
+    # mean, var, ordered_names = get_ensemble_variance(all_val_renders, all_val_image_names)
+    test_dirs = [os.path.join(tmp_dir, f"model_{i}_test") for i in range(num_models)]
+    val_dirs = [os.path.join(tmp_dir, f"model_{i}_val") for i in range(num_models)]
+
+    mean, var, ordered_names = get_ensemble_variance_from_disk(test_dirs)
+    mean_val, var_val, ordered_names_val = get_ensemble_variance_from_disk(val_dirs)
+
     save_ens_uncertainty(var, ordered_names, ens_path)
     save_ens_mean_pred(mean, ordered_names, ens_path)
 
+    save_ens_uncertainty(var_val, ordered_names_val, ens_path)
+    save_ens_mean_pred(mean_val, ordered_names_val, ens_path)
+
+    del all_val_renders
+    # del all_val_image_names
+
     ### Get Ensemble Performance Metrics
-    viewpoints = scene.getValCameras()
+    viewpoints = scene.getTestCameras()
     calc_ens_metrics(viewpoints, ordered_names, mean, var, model_params.model_path)
 
     ### Filter High Variance Gaussians ###
@@ -1457,16 +1611,74 @@ def ensemble(model_params, opt_params, pipe_params, testing_iterations, saving_i
                         bgs[1], opt_params.learn_background, opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
                         opt_params.do_seathru, opt_params.seathru_from_iter, opt_params.bg_from_bs, water_models[0], water_models[1],
                         opt_params.do_z_score, opt_params.filter_depth, opt_params.disable_attenuation,
-                        ens_vars=var, ens_radii=val_radiis
+                        ens_vars_test=var, ens_vars_val=var_val
                         )
             else:
                 evaluate_gaussian_filtering(opt_params, 30000, scene, render, (pipe_params, bgs[0]),
                         bgs[1], opt_params.learn_background, opt_params.normalize_depth, opt_params.norm_depth_max, opt_params.use_gt_depth,
-                        filter_depth=opt_params.filter_depth, ens_vars=var, ens_radii=val_radiis
+                        filter_depth=opt_params.filter_depth, ens_vars_test=var, ens_vars_val=var_val
                         )
     
 
-    
+def get_ensemble_variance_from_disk(tmp_dirs, normalize=False):
+    """
+    tmp_dirs: list of model directories, e.g.
+        ["tmp_preds/model_0_test", "tmp_preds/model_1_test", ...]
+    """
+
+    mean = {}
+    M2 = {}
+    count = defaultdict(int)
+
+    all_names = None
+
+    for m_idx, model_dir in enumerate(tmp_dirs):
+
+        file_names = [f for f in os.listdir(model_dir) if f.endswith(".pt")]
+
+        image_names = [f.replace(".pt", "") for f in file_names]
+
+        if all_names is None:
+            all_names = sorted(image_names)
+
+        name_set = set(image_names)
+
+        for img_name in all_names:
+
+            if img_name not in name_set:
+                continue  # or raise error if strict matching required
+
+            path = os.path.join(model_dir, f"{img_name}.pt")
+            render = torch.load(path, map_location="cpu").float()
+
+            if count[img_name] == 0:
+                mean[img_name] = render.clone()
+                M2[img_name] = torch.zeros_like(render)
+                count[img_name] = 1
+
+            else:
+                count[img_name] += 1
+
+                delta = render - mean[img_name]
+                mean[img_name] += delta / count[img_name]
+
+                delta2 = render - mean[img_name]
+                M2[img_name] += delta * delta2
+
+    ordered_names = sorted(mean.keys())
+
+    pred_mean = [mean[n] for n in ordered_names]
+    variance = [M2[n] / count[n] for n in ordered_names]
+
+    if normalize:
+        pred_mean = [
+            torch.clamp(m / torch.max(m), 0.0, 1.0) for m in pred_mean
+        ]
+        variance = [
+            torch.clamp(v / torch.max(v), 0.0, 1.0) for v in variance
+        ]
+
+    return pred_mean, variance, ordered_names
                         
 
 if __name__ == "__main__":
@@ -1495,12 +1707,6 @@ if __name__ == "__main__":
     args.checkpoint_iterations.append(args.iterations)
 
     for _ in range(args.reps):
-        print("------------")
-        print(torch.cuda.memory_summary())
-        print("Start Allocated:", torch.cuda.memory_allocated() / 1024**3, "GB")
-        print("Start Reserved :", torch.cuda.memory_reserved() / 1024**3, "GB")
-        print("------------")
-
         now = datetime.now()
         today = now.strftime("%m%d%Y")
         args.model_path = str(Path(args.source_path) / "experiments" / today / args.exp)
